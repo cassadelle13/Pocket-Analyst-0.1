@@ -1,0 +1,51 @@
+sources:
+  http_events:
+    type: http_server
+    address: 0.0.0.0:9000
+    decoding:
+      codec: bytes
+
+transforms:
+  enrich_events:
+    type: remap
+    inputs:
+      - http_events
+    source: |
+      . = parse_json!(strip_whitespace(string!(.message)))
+      del(.message)
+      .received_at = now()
+      if is_null(.project_id) {
+        .project_id = "proj_001"
+      }
+      if is_null(.event_type) {
+        .event_type = "custom"
+      }
+      if is_null(.event_name) {
+        .event_name = .event_type
+      }
+      .timestamp = format_timestamp!(now(), format: "%Y-%m-%d %H:%M:%S%.3f")
+      if !exists(.properties) {
+        .properties = {}
+      }
+      if !is_string(.properties) {
+        .properties = encode_json(.properties)
+      }
+
+sinks:
+  clickhouse:
+    type: clickhouse
+    inputs:
+      - enrich_events
+    endpoint: "http://storage:8123"
+    database: "analytics"
+    table: "events"
+    compression: "gzip"
+    skip_unknown_fields: true
+    auth:
+      strategy: basic
+      user: "default"
+      password: ""
+    acknowledgements:
+      enabled: true
+    healthcheck:
+      enabled: true

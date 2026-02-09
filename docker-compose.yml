@@ -1,0 +1,290 @@
+services:
+  ingest:
+    build:
+      context: ./ingest
+    container_name: pocketanalyst-ingest
+    volumes:
+      - ./ingest/vector.yaml:/etc/vector/vector.yaml:ro
+    ports:
+      - "9009:9000"
+    environment:
+      - CLICKHOUSE_ENDPOINT=http://storage:8123
+    depends_on:
+      storage:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - pocketanalyst
+
+  storage:
+    build:
+      context: ./storage
+    container_name: pocketanalyst-storage
+    ports:
+      - "8123:8123"
+    volumes:
+      - clickhouse_data_v2:/var/lib/clickhouse
+      - ./storage/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+    networks:
+      - pocketanalyst
+
+  postgres:
+    image: postgres:14-alpine
+    container_name: datatalk-postgres
+    ports:
+      - "15432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    volumes:
+      - datatalk_postgres_data:/var/lib/postgresql/data
+      - ./datatalk-db-init/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    networks:
+      - pocketanalyst
+
+  postgres-init:
+    image: postgres:14-alpine
+    container_name: datatalk-postgres-init
+    depends_on:
+      - postgres
+    environment:
+      - PGPASSWORD=postgres
+    volumes:
+      - ./datatalk-db-init/postgres:/init:ro
+    command: >
+      sh -lc "
+        for i in $(seq 1 60); do
+          pg_isready -h postgres -U postgres -d postgres && break;
+          sleep 2;
+        done;
+        psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 -f /init/02_init_idempotent.sql
+      "
+    restart: "no"
+    networks:
+      - pocketanalyst
+
+  mysql:
+    image: mysql:8.4
+    container_name: datatalk-mysql
+    ports:
+      - "13306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=datatalk
+      - MYSQL_USER=datatalk
+      - MYSQL_PASSWORD=datatalk
+    volumes:
+      - datatalk_mysql_data:/var/lib/mysql
+      - ./datatalk-db-init/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    networks:
+      - pocketanalyst
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: datatalk-mssql
+    ports:
+      - "11433:1433"
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_PID=Developer
+      - MSSQL_SA_PASSWORD=YourStrong!Passw0rd
+    volumes:
+      - datatalk_mssql_data:/var/opt/mssql
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+    networks:
+      - pocketanalyst
+
+  mssql-init:
+    image: mcr.microsoft.com/mssql-tools:latest
+    container_name: datatalk-mssql-init
+    depends_on:
+      - mssql
+    environment:
+      - MSSQL_SA_PASSWORD=YourStrong!Passw0rd
+    volumes:
+      - ./datatalk-db-init/mssql:/init:ro
+    command: >
+      bash -lc "
+        set -e;
+        ready=0;
+        for i in {1..120}; do
+          /opt/mssql-tools/bin/sqlcmd -S mssql,1433 -U sa -P \"$${MSSQL_SA_PASSWORD}\" -l 30 -C -Q 'SELECT 1' && ready=1 && break;
+          sleep 2;
+        done;
+        if [ \"$$ready\" -ne 1 ]; then
+          echo 'MSSQL did not become ready in time';
+          exit 1;
+        fi;
+        /opt/mssql-tools/bin/sqlcmd -S mssql,1433 -U sa -P \"$${MSSQL_SA_PASSWORD}\" -l 30 -C -i /init/01_init.sql
+      "
+    restart: "no"
+    networks:
+      - pocketanalyst
+
+  ai-service:
+    build:
+      context: ./ai-service
+    container_name: pocketanalyst-ai
+    ports:
+      - "8004:8000"
+    environment:
+      - CLICKHOUSE_HOST=storage
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=analytics
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - LITELLM_MODEL=gpt-4o-mini
+    depends_on:
+      storage:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    networks:
+      - pocketanalyst
+
+  datatalk-agent:
+    build:
+      context: ./datatalk-agent
+    container_name: datatalk-agent
+    ports:
+      - "9010:9010"
+    environment:
+      - DATATALK_AGENT_HOST=0.0.0.0
+      - DATATALK_AGENT_PORT=9010
+      - DATATALK_AGENT_SHARED_SECRET=dev-agent-secret
+    depends_on:
+      storage:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - pocketanalyst
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: datatalk-metabase
+    ports:
+      - "3001:3000"
+    environment:
+      - MB_DB_TYPE=h2
+      - MB_DB_FILE=/metabase-data/metabase.db
+      - MB_ENABLE_PUBLIC_SHARING=true
+      - MB_ENABLE_EMBEDDING_STATIC=true
+      - MB_EMBEDDING_SECRET_KEY=dev-metabase-embed-secret
+    volumes:
+      - metabase_data:/metabase-data
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    networks:
+      - pocketanalyst
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: datatalk-cloudflared
+    environment:
+      - CLOUDFLARE_TUNNEL_TOKEN=
+    command: >
+      sh -lc "
+        if [ -z \"$${CLOUDFLARE_TUNNEL_TOKEN}\" ]; then
+          echo 'CLOUDFLARE_TUNNEL_TOKEN is not set; cloudflared is idle';
+          sleep infinity;
+        else
+          cloudflared tunnel --no-autoupdate run --token \"$${CLOUDFLARE_TUNNEL_TOKEN}\";
+        fi
+      "
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - pocketanalyst
+
+  dashboard:
+    build:
+      context: ./dashboard
+    container_name: pocketanalyst-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_AI_API_URL=http://localhost:8004
+      - AI_SERVICE_URL=http://ai-service:8000
+      - DATATALK_AGENT_URL=http://datatalk-agent:9010
+      - DATATALK_AGENT_SHARED_SECRET=dev-agent-secret
+      - DATATALK_META_PG_HOST=postgres
+      - DATATALK_META_PG_PORT=5432
+      - DATATALK_META_PG_DATABASE=datatalk
+      - DATATALK_META_PG_USER=datatalk
+      - DATATALK_META_PG_PASSWORD=datatalk
+      - DATATALK_META_ENCRYPTION_KEY=dev-only-change-me
+      - METABASE_SITE_URL=http://metabase:3000
+      - METABASE_PUBLIC_URL=http://localhost:3001
+      - METABASE_EMBEDDING_SECRET_KEY=dev-metabase-embed-secret
+      - NEXT_PUBLIC_METABASE_SITE_URL=http://localhost:3001
+      - CLICKHOUSE_HOST=storage
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=analytics
+      - NEXT_PUBLIC_CLICKHOUSE_HOST=storage
+      - NEXT_PUBLIC_CLICKHOUSE_PORT=8123
+      - NEXT_PUBLIC_CLICKHOUSE_DATABASE=analytics
+    depends_on:
+      ai-service:
+        condition: service_started
+      storage:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    networks:
+      - pocketanalyst
+
+volumes:
+  clickhouse_data_v2:
+  datatalk_postgres_data:
+  datatalk_mysql_data:
+  datatalk_mssql_data:
+  metabase_data:
+
+networks:
+  pocketanalyst:
+    driver: bridge

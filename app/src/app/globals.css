@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+:root {
+  /* Midnight Blue palette */
+  --midnight-900: #0f172a;
+  --midnight-800: #1e293b;
+  --midnight-700: #334155;
+  --midnight-600: #475569;
+  --midnight-500: #64748b;
+  
+  /* Cyber Lime accent */
+  --cyber-lime: #a3e635;
+  --cyber-lime-dim: #84cc16;
+  --cyber-lime-glow: rgba(163, 230, 53, 0.3);
+  
+  /* Graphite */
+  --graphite-900: #18181b;
+  --graphite-800: #27272a;
+  
+  /* Neon Purple accent */
+  --neon-purple: #a855f7;
+  --neon-purple-dim: #9333ea;
+}
+
+body {
+  background: var(--midnight-900);
+  color: #e2e8f0;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* Cyber Lime glow effect for AI elements */
+.ai-glow {
+  box-shadow: 0 0 20px var(--cyber-lime-glow), 0 0 40px rgba(163, 230, 53, 0.1);
+}
+
+/* Smooth scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--midnight-800);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--midnight-600);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--midnight-500);
+}

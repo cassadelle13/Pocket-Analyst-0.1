@@ -1,0 +1,69 @@
+# Минимальный набор сервисов для быстрого запуска Chart Builder
+version: '3.8'
+
+services:
+  storage:
+    build:
+      context: ./storage
+    container_name: pocketanalyst-storage
+    ports:
+      - "8123:8123"
+    volumes:
+      - clickhouse_data_v2:/var/lib/clickhouse
+      - ./storage/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+    networks:
+      - pocketanalyst
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: pocketanalyst-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_AI_API_URL=http://localhost:8004
+      - AI_SERVICE_URL=http://ai-service:8000
+      - DATATALK_AGENT_URL=http://datatalk-agent:9010
+      - DATATALK_AGENT_SHARED_SECRET=dev-agent-secret
+      - DATATALK_META_PG_HOST=postgres
+      - DATATALK_META_PG_PORT=5432
+      - DATATALK_META_PG_DATABASE=datatalk
+      - DATATALK_META_PG_USER=datatalk
+      - DATATALK_META_PG_PASSWORD=datatalk
+      - DATATALK_META_ENCRYPTION_KEY=dev-only-change-me
+      - METABASE_SITE_URL=http://metabase:3000
+      - METABASE_PUBLIC_URL=http://localhost:3001
+      - METABASE_EMBEDDING_SECRET_KEY=dev-metabase-embed-secret
+      - NEXT_PUBLIC_METABASE_SITE_URL=http://localhost:3001
+      - CLICKHOUSE_HOST=storage
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=analytics
+      - NEXT_PUBLIC_CLICKHOUSE_HOST=storage
+      - NEXT_PUBLIC_CLICKHOUSE_PORT=8123
+      - NEXT_PUBLIC_CLICKHOUSE_DATABASE=analytics
+    depends_on:
+      storage:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    networks:
+      - pocketanalyst
+
+volumes:
+  clickhouse_data_v2:
+
+networks:
+  pocketanalyst:
+    driver: bridge
