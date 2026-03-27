@@ -7,7 +7,7 @@ import { Table, TableBody, TableHead, TableRow, TableCell } from "@tremor/react"
 type Props<T> = {
   items: T[];
   renderHeader: React.ReactNode;
-  renderRow: (item: T) => React.ReactNode;
+  renderRow: (item: T, index: number) => React.ReactNode;
   estimateRowHeight?: number;
   height: number;
   colSpan: number;
@@ -51,7 +51,7 @@ export function VirtualizedTable<T>({
 
           {virtualItems.map((vi) => {
             const item = items[vi.index];
-            return <React.Fragment key={vi.key}>{renderRow(item)}</React.Fragment>;
+            return <React.Fragment key={vi.key}>{renderRow(item, vi.index)}</React.Fragment>;
           })}
 
           {bottomPad > 0 && (

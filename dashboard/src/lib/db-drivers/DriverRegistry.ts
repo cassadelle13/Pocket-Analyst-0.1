@@ -11,6 +11,37 @@ const createTemplate = (overrides: Partial<DbDriverDescriptor["defaultTemplate"]
 
 export const DB_DRIVERS: DbDriverDescriptor[] = [
   {
+    id: "csv",
+    name: "CSV File",
+    vendor: "Local Files",
+    categories: ["analytic"],
+    shortDescription: "Подключение CSV через ClickHouse-таблицы",
+    accentGradient: "from-emerald-400/80 to-teal-500/80",
+    tags: ["CSV", "Files", "Import"],
+    defaultTemplate: createTemplate({ host: "storage", port: 8123, database: "analytics", user: "default" }),
+    connectivity: { protocol: "csv", status: "available", supportsAgent: true },
+    features: { ssl: false, ssh: false, proxy: false, schemaDiscovery: true, ingestion: false },
+    popularityRank: 0,
+    connectionProperties: [
+      {
+        id: "csv_table_name",
+        key: "table",
+        label: "Table Name",
+        description: "Имя импортированной таблицы в ClickHouse (например: online_retail)",
+        type: "string",
+        defaultValue: "online_retail",
+      },
+      {
+        id: "csv_source_file",
+        key: "source_file",
+        label: "Source File",
+        description: "Путь к исходному CSV для справки",
+        type: "string",
+        defaultValue: "storage/init/online_retail_II.csv",
+      },
+    ],
+  },
+  {
     id: "postgresql",
     name: "PostgreSQL",
     vendor: "PostgreSQL Global Development Group",
@@ -357,4 +388,4 @@ export const getDriverById = (id: string) => DRIVER_MAP.get(id) ?? DB_DRIVERS[0]
 export const getDriversByCategory = (category: DbDriverCategory) =>
   DB_DRIVERS.filter((driver) => driver.categories.includes(category));
 
-export const SUPPORTED_PROTOCOLS: ConnectivityProtocol[] = ["postgres", "mysql", "mssql"];
+export const SUPPORTED_PROTOCOLS: ConnectivityProtocol[] = ["csv", "postgres", "mysql", "mssql", "clickhouse"];

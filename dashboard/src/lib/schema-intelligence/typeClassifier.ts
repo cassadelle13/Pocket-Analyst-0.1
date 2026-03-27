@@ -71,11 +71,20 @@ function normalizeType(sqlType: string): string {
     .trim();
 }
 
+function isIdentifierLike(columnName: string): boolean {
+  const n = columnName.toLowerCase().trim();
+  if (n === 'id') return true;
+  if (n.endsWith('_id')) return true;
+  if (n.endsWith('id') && n.length <= 6) return true;
+  return false;
+}
+
 /**
  * Classify a single column based on its SQL type
  */
 export function classifyColumn(column: ColumnMetadata): Classification {
   const normalizedType = normalizeType(column.type);
+  const identifierLike = isIdentifierLike(column.name);
   
   // Check time types first (most specific)
   if (TIME_TYPES.has(normalizedType)) {
@@ -84,6 +93,9 @@ export function classifyColumn(column: ColumnMetadata): Classification {
   
   // Check measure types (numeric)
   if (MEASURE_TYPES.has(normalizedType)) {
+    if (identifierLike) {
+      return 'dimension';
+    }
     return 'measure';
   }
   

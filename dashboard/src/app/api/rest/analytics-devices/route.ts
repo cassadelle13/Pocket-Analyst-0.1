@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { safeISODate, sqlStringLiteral } from "../../../../lib/propertyFilterUtils";
+import { safeISODate, sqlDateTime64UTC, parsePropertyFiltersFromURL, propertyFilterToSQL } from "../../../../lib/propertyFilterUtils";
 
 
 const CLICKHOUSE_HOST = process.env.CLICKHOUSE_HOST || "localhost";
@@ -53,8 +53,8 @@ export async function GET(request: NextRequest) {
       sumOrNull(toFloat64OrNull(JSONExtractString(properties, 'revenue'))) AS revenue_a,
       sumOrNull(toFloat64OrNull(JSONExtractString(properties, 'amount'))) AS revenue_b
     FROM events
-    WHERE timestamp >= ${sqlStringLiteral(startDate)}
-      AND timestamp <= ${sqlStringLiteral(endDate)}
+    WHERE timestamp >= ${sqlDateTime64UTC(startDate)}
+      AND timestamp <= ${sqlDateTime64UTC(endDate)}
     GROUP BY category
     ORDER BY value DESC
     LIMIT 12

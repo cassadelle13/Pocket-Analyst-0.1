@@ -75,7 +75,7 @@ export default function RetentionMatrix({ data = [], loading, days = 30, onDaysC
             </div>
             <div>
               <Title className="text-white">Retention Matrix</Title>
-              <Text className="text-slate-400 text-sm mt-1">N‑day retention cohorts</Text>
+              <Text className="text-slate-400 text-sm mt-1">Cohort Pivot (N‑day)</Text>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -127,7 +127,7 @@ export default function RetentionMatrix({ data = [], loading, days = 30, onDaysC
             <SkeletonMatrix />
           ) : matrix.rows.length === 0 ? (
             <div className="text-center py-12 text-slate-500">
-              No retention data available
+              No cohort pivot data available
             </div>
           ) : (
             <div className="min-w-[800px]">

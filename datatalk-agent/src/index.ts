@@ -156,8 +156,9 @@ function enforceRolePolicy(sql: string, role: Role): void {
   }
 
   // Extra hard-blocks.
-  const forbidden = ["insert", "update", "delete", "alter", "drop", "truncate", "create", "grant", "revoke"]; 
-  if (forbidden.some((kw) => cleaned.includes(kw))) {
+  const forbidden = ["insert", "update", "delete", "alter", "drop", "truncate", "create", "grant", "revoke"];
+  const forbiddenWord = new RegExp(`\\b(${forbidden.join("|")})\\b`, "i");
+  if (forbiddenWord.test(cleaned)) {
     throw new Error("Query contains forbidden keywords for this role");
   }
 }

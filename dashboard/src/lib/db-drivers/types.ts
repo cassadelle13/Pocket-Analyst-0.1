@@ -3,6 +3,7 @@ export type DbDriverCategory = "sql" | "nosql" | "analytic" | "cloud" | "newsql"
 export type ConnectivityStatus = "available" | "preview" | "coming_soon";
 
 export type ConnectivityProtocol =
+  | "csv"
   | "postgres"
   | "mysql"
   | "mssql"

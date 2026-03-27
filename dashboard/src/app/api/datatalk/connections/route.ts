@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
 
     if (!name) return NextResponse.json({ error: "name is required" }, { status: 400 });
     if (!host) return NextResponse.json({ error: "host is required" }, { status: 400 });
-    if (type !== "clickhouse" && type !== "postgres" && type !== "mysql" && type !== "mssql") {
+    if (type !== "clickhouse" && type !== "postgres" && type !== "mysql" && type !== "mssql" && type !== "csv") {
       return NextResponse.json({ error: "invalid type" }, { status: 400 });
     }
 

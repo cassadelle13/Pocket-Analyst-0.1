@@ -106,10 +106,9 @@ export default function ActivityPage() {
           if (!cancelled) setRawActivityData([]);
           return;
         }
-        const params = new URLSearchParams({
-          startDate: dateRange.start.toISOString(),
-          endDate: dateRange.end.toISOString(),
-        });
+        const params = new URLSearchParams();
+        if (dateRange?.start) params.set("startDate", dateRange.start.toISOString());
+        if (dateRange?.end) params.set("endDate", dateRange.end.toISOString());
         const res = await fetch(`/api/rest/analytics-activity-24h?${params.toString()}`, { cache: "no-store" });
         const json = await res.json();
         if (!cancelled && Array.isArray(json)) setRawActivityData(json);
@@ -118,7 +117,7 @@ export default function ActivityPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [isDemoMode, dateRange.start, dateRange.end]);
+  }, [isDemoMode, dateRange?.start, dateRange?.end]);
 
   // Fetch event types
   useEffect(() => {
@@ -129,10 +128,9 @@ export default function ActivityPage() {
           if (!cancelled) setRawEventTypes([]);
           return;
         }
-        const params = new URLSearchParams({
-          startDate: dateRange.start.toISOString(),
-          endDate: dateRange.end.toISOString(),
-        });
+        const params = new URLSearchParams();
+        if (dateRange?.start) params.set("startDate", dateRange.start.toISOString());
+        if (dateRange?.end) params.set("endDate", dateRange.end.toISOString());
         const res = await fetch(`/api/rest/analytics-event-types?${params.toString()}`, { cache: "no-store" });
         const json = await res.json();
         if (!cancelled && Array.isArray(json)) setRawEventTypes(json as any);
@@ -141,7 +139,7 @@ export default function ActivityPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [isDemoMode, dateRange.start, dateRange.end]);
+  }, [isDemoMode, dateRange?.start, dateRange?.end]);
 
   const handleDrillDown = (category: string, dataPoint: any) => {
     setSelectedDrilldown({

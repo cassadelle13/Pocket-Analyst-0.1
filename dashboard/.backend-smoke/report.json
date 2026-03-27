@@ -1,0 +1,15 @@
+{
+  "startedAt": "2026-02-22T07:55:18.375Z",
+  "baseUrl": "http://localhost:3000",
+  "env": {
+    "hasProjectId": false,
+    "hasConnectionId": false,
+    "hasSemanticModelId": false
+  },
+  "checks": [],
+  "summary": {
+    "pass": 0,
+    "fail": 0,
+    "totalMs": 1
+  }
+}

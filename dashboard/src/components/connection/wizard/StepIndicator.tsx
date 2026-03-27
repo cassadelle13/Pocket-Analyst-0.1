@@ -44,8 +44,7 @@ export function StepIndicator({ steps = WIZARD_STEPS, currentStep, onSelectStep 
               )}
             </div>
             <div>
-              <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Step {index + 1}</p>
-              <p className="text-sm font-medium text-white">{step.label}</p>
+              <p className="text-xs uppercase tracking-[0.3em] text-slate-400">{step.label}</p>
             </div>
           </button>
         );

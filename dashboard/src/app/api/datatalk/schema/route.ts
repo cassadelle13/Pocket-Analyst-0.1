@@ -11,11 +11,18 @@ function getAgentSecret() {
   return process.env.DATATALK_AGENT_SHARED_SECRET || "";
 }
 
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
     const connectionId = typeof body?.connectionId === "string" ? body.connectionId : null;
+    if (connectionId && !isUuid(connectionId)) {
+      return NextResponse.json({ error: "Invalid connectionId format" }, { status: 400 });
+    }
     const agentPayload = connectionId
       ? await (async () => {
           const secret = await getConnectionSecretForAgent(connectionId);

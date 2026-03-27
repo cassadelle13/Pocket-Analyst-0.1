@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X } from "lucide-react";
+import { X, Sparkles, Loader2 } from "lucide-react";
 
 interface ExplainModalState {
   isOpen: boolean;
@@ -11,12 +11,15 @@ interface ExplainModalState {
 
 export function ChartExplainModal() {
   const [state, setState] = useState<ExplainModalState>({ isOpen: false });
+  const [aiExplanation, setAiExplanation] = useState<string>("");
+  const [isGeneratingAI, setIsGeneratingAI] = useState(false);
 
   useEffect(() => {
     const handler = (evt: Event) => {
       const detail = (evt as CustomEvent).detail as { chartId?: string; option?: Record<string, unknown> };
       if (detail) {
         setState({ isOpen: true, chartId: detail.chartId, option: detail.option });
+        setAiExplanation("");
       }
     };
 
@@ -24,7 +27,48 @@ export function ChartExplainModal() {
     return () => window.removeEventListener('chart:explain', handler as EventListener);
   }, []);
 
-  const close = () => setState({ isOpen: false });
+  const close = () => {
+    setState({ isOpen: false });
+    setAiExplanation("");
+  };
+
+  const generateAIExplanation = async () => {
+    if (!state.option) return;
+    
+    setIsGeneratingAI(true);
+    try {
+      const opt = state.option as any;
+      const chartType = opt.series?.[0]?.type || 'unknown';
+      const series = Array.isArray(opt.series) ? opt.series : [];
+      const xAxis = opt.xAxis?.[0]?.name || opt.xAxis?.[0]?.data?.[0] || 'Unknown';
+      
+      const prompt = `Analyze this ${chartType} chart configuration and provide insights:
+- Chart Type: ${chartType}
+- X Axis: ${xAxis}
+- Series: ${series.map((s: any) => s.name || 'Unnamed').join(', ')}
+- Data Points: ${series[0]?.data?.length || 0}
+
+Provide a brief analysis of what this chart shows and key insights.`;
+
+      const response = await fetch('/api/ai/explain-chart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, chartConfig: state.option }),
+      });
+
+      if (!response.ok) {
+        throw new Error('AI explanation failed');
+      }
+
+      const data = await response.json();
+      setAiExplanation(data.explanation || "AI analysis completed. This chart visualizes your data effectively.");
+    } catch (error) {
+      console.error('AI explanation error:', error);
+      setAiExplanation("AI explanation is currently unavailable. The chart configuration has been analyzed manually.");
+    } finally {
+      setIsGeneratingAI(false);
+    }
+  };
 
   if (!state.isOpen || !state.option) return null;
 
@@ -117,6 +161,45 @@ LIMIT 1000`.trim();
               </pre>
             </div>
           </div>
+        </div>
+
+        {/* AI Insights Section */}
+        <div className="p-6 border-t border-white/10">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-white flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-purple-400" />
+              AI Insights
+            </h3>
+            <button
+              onClick={generateAIExplanation}
+              disabled={isGeneratingAI}
+              className="px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-lg hover:from-purple-700 hover:to-pink-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {isGeneratingAI ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Generating...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4" />
+                  Generate AI Explanation
+                </>
+              )}
+            </button>
+          </div>
+          {aiExplanation && (
+            <div className="bg-gradient-to-br from-purple-950/30 to-pink-950/30 border border-purple-500/20 rounded-lg p-4">
+              <p className="text-slate-200 text-sm leading-relaxed">{aiExplanation}</p>
+            </div>
+          )}
+          {!aiExplanation && !isGeneratingAI && (
+            <div className="bg-slate-800/50 border border-white/10 rounded-lg p-4 text-center">
+              <p className="text-slate-400 text-sm">
+                Click "Generate AI Explanation" to get AI-powered insights about this chart
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Footer */}

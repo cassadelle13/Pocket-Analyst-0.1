@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState, useRef, ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 
 export interface PropertyFilter {
   key: string;
@@ -9,21 +9,22 @@ export interface PropertyFilter {
 }
 
 export interface Segment {
-  field: string;
-  operator: string;
+  id: string;
+  name: string;
   value: string;
-  label: string;
+  field?: string;
+  operator?: string;
+  label?: string;
 }
 
-interface DateRange {
+export interface DateRange {
   start: Date;
   end: Date;
-  label: string;
 }
 
 interface GlobalFiltersState {
-  dateRange: DateRange;
-  setDateRange: (range: DateRange) => void;
+  dateRange: DateRange | null;
+  setDateRange: (range: DateRange | null) => void;
   segments: Segment[];
   setSegments: (segments: Segment[]) => void;
   propertyFilters: PropertyFilter[];
@@ -45,11 +46,7 @@ interface GlobalFiltersState {
 const GlobalFiltersContext = createContext<GlobalFiltersState | null>(null);
 
 export function GlobalFiltersProvider({ children }: { children: ReactNode }) {
-  const [dateRange, setDateRange] = useState<DateRange>({
-    start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-    end: new Date(),
-    label: "Last 7 days",
-  });
+  const [dateRange, setDateRange] = useState<DateRange | null>(null);
   
   const [segments, setSegments] = useState<Segment[]>([]);
   const [propertyFilters, setPropertyFilters] = useState<PropertyFilter[]>([]);
@@ -73,25 +70,21 @@ export function GlobalFiltersProvider({ children }: { children: ReactNode }) {
   const clearAllFilters = () => {
     setSegments([]);
     setPropertyFilters([]);
-    setDateRange({
-      start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-      end: new Date(),
-      label: "Last 7 days",
-    });
+    setDateRange(null);
   };
 
   // Helper methods for compatibility with existing code
   const getRefineFilters = () => {
     return segments.map(seg => ({
-      field: seg.field,
-      operator: seg.operator,
+      field: seg.field || seg.id,
+      operator: seg.operator || "eq",
       value: seg.value,
     }));
   };
 
   const getSegmentDescription = () => {
     if (segments.length === 0) return "All users";
-    return segments.map((s) => s.label).join(", ");
+    return segments.map(s => s.name || s.value).join(", ");
   };
 
   // Sync from URL on mount
@@ -107,7 +100,6 @@ export function GlobalFiltersProvider({ children }: { children: ReactNode }) {
       setDateRange({
         start: new Date(start),
         end: new Date(end),
-        label: "Custom range",
       });
     }
     
@@ -150,8 +142,10 @@ export function GlobalFiltersProvider({ children }: { children: ReactNode }) {
     const params = new URLSearchParams();
     
     // Date range
-    params.set('start', dateRange.start.toISOString());
-    params.set('end', dateRange.end.toISOString());
+    if (dateRange?.start && dateRange?.end) {
+      params.set('start', dateRange.start.toISOString());
+      params.set('end', dateRange.end.toISOString());
+    }
     
     // Segments
     if (segments.length > 0) {
@@ -168,22 +162,15 @@ export function GlobalFiltersProvider({ children }: { children: ReactNode }) {
     window.history.replaceState({}, '', newURL);
   };
 
-  // Sync from URL on mount (only once)
+  // Sync to URL on any state change
+  useEffect(() => {
+    syncToURL();
+  }, [dateRange, segments, propertyFilters]);
+
+  // Sync from URL on mount
   useEffect(() => {
     syncFromURL();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Sync to URL on any state change (but skip initial mount)
-  const isInitialMount = useRef(true);
-  useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-    syncToURL();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dateRange, segments, propertyFilters]);
 
   const value: GlobalFiltersState = {
     dateRange,

@@ -3,7 +3,9 @@
  * Comprehensive configuration for all chart types with granular control
  */
 
-export type ChartType = 'uplot' | 'echarts' | 'funnel' | 'retention' | 'sankey';
+import type { VizType } from "@/types/viz";
+
+export type ChartType = 'uplot' | 'echarts' | 'funnel' | 'sankey';
 
 export interface GradientStop {
   offset: number;
@@ -17,6 +19,41 @@ export interface GradientConfig {
   x2: number;
   y2: number;
   colorStops: GradientStop[];
+}
+
+export interface CreativeConfig {
+  colorTheme: 'custom' | 'neon-green' | 'cyber-blue' | 'sunset-orange' | 'aurora' | 'synthwave';
+  lineGlow: {
+    enabled: boolean;
+    color: string;
+    intensity: number;
+    spread: number;
+  };
+  areaGradient: {
+    enabled: boolean;
+    topColor: string;
+    bottomColor: string;
+    opacity: number;
+    direction: 'vertical' | 'horizontal' | 'radial';
+  };
+  itemGlow: {
+    enabled: boolean;
+    color: string;
+    intensity: number;
+    innerGlow: boolean;
+  };
+  glassmorphism: {
+    enabled: boolean;
+    blur: number;
+    tint: string;
+    borderGlow: string;
+  };
+  pulseMarkers: {
+    enabled: boolean;
+    color: string;
+    size: number;
+    speed: number;
+  };
 }
 
 export interface TickConfig {
@@ -247,6 +284,7 @@ export interface GeneralConfig {
   width?: number | string;
   height?: number;
   backgroundColor?: string;
+  vizType?: VizType;
   
   // Padding
   padding?: {
@@ -279,6 +317,7 @@ export interface ChartConfig {
   legend?: LegendConfig;
   tooltip?: TooltipConfig;
   advanced?: AdvancedConfig;
+  creative?: CreativeConfig;
   
   // Metadata
   createdAt?: string;
@@ -334,6 +373,14 @@ export const DEFAULT_CONFIGS: Record<ChartType, Partial<ChartConfig>> = {
       borderColor: '#334155',
       borderWidth: 1,
       textStyle: { color: '#e2e8f0', fontSize: 12 },
+    },
+    creative: {
+      colorTheme: 'custom',
+      lineGlow: { enabled: false, color: 'rgba(16,185,129,0.6)', intensity: 10, spread: 0 },
+      areaGradient: { enabled: false, topColor: 'rgba(16,185,129,0.3)', bottomColor: 'rgba(16,185,129,0.05)', opacity: 0.3, direction: 'vertical' },
+      itemGlow: { enabled: false, color: 'rgba(16,185,129,0.45)', intensity: 8, innerGlow: false },
+      glassmorphism: { enabled: false, blur: 16, tint: 'rgba(255,255,255,0.05)', borderGlow: 'rgba(255,255,255,0.14)' },
+      pulseMarkers: { enabled: false, color: 'rgba(16,185,129,0.9)', size: 8, speed: 1400 },
     },
   },
   echarts: {
@@ -396,6 +443,14 @@ export const DEFAULT_CONFIGS: Record<ChartType, Partial<ChartConfig>> = {
         iconStyle: { borderColor: 'rgba(203,213,225,0.65)' },
       },
     },
+    creative: {
+      colorTheme: 'custom',
+      lineGlow: { enabled: true, color: 'rgba(16,185,129,0.6)', intensity: 10, spread: 0 },
+      areaGradient: { enabled: true, topColor: 'rgba(16,185,129,0.3)', bottomColor: 'rgba(16,185,129,0.05)', opacity: 0.3, direction: 'vertical' },
+      itemGlow: { enabled: false, color: 'rgba(16,185,129,0.45)', intensity: 8, innerGlow: false },
+      glassmorphism: { enabled: false, blur: 16, tint: 'rgba(255,255,255,0.05)', borderGlow: 'rgba(255,255,255,0.14)' },
+      pulseMarkers: { enabled: false, color: 'rgba(16,185,129,0.9)', size: 8, speed: 1400 },
+    },
   },
   funnel: {
     chartType: 'funnel',
@@ -419,21 +474,13 @@ export const DEFAULT_CONFIGS: Record<ChartType, Partial<ChartConfig>> = {
       borderWidth: 1,
       textStyle: { color: '#e2e8f0', fontSize: 12 },
     },
-  },
-  retention: {
-    chartType: 'retention',
-    general: {
-      height: 600,
-      backgroundColor: 'transparent',
-    },
-    series: [],
-    tooltip: {
-      show: true,
-      trigger: 'item',
-      backgroundColor: 'rgba(2,6,23,0.92)',
-      borderColor: '#334155',
-      borderWidth: 1,
-      textStyle: { color: '#e2e8f0', fontSize: 12 },
+    creative: {
+      colorTheme: 'custom',
+      lineGlow: { enabled: false, color: 'rgba(16,185,129,0.6)', intensity: 10, spread: 0 },
+      areaGradient: { enabled: false, topColor: 'rgba(16,185,129,0.3)', bottomColor: 'rgba(16,185,129,0.05)', opacity: 0.3, direction: 'vertical' },
+      itemGlow: { enabled: true, color: 'rgba(16,185,129,0.45)', intensity: 10, innerGlow: true },
+      glassmorphism: { enabled: false, blur: 16, tint: 'rgba(255,255,255,0.05)', borderGlow: 'rgba(255,255,255,0.14)' },
+      pulseMarkers: { enabled: false, color: 'rgba(16,185,129,0.9)', size: 8, speed: 1400 },
     },
   },
   sankey: {
@@ -450,6 +497,14 @@ export const DEFAULT_CONFIGS: Record<ChartType, Partial<ChartConfig>> = {
       borderColor: '#334155',
       borderWidth: 1,
       textStyle: { color: '#e2e8f0', fontSize: 12 },
+    },
+    creative: {
+      colorTheme: 'custom',
+      lineGlow: { enabled: false, color: 'rgba(16,185,129,0.6)', intensity: 10, spread: 0 },
+      areaGradient: { enabled: false, topColor: 'rgba(16,185,129,0.3)', bottomColor: 'rgba(16,185,129,0.05)', opacity: 0.3, direction: 'vertical' },
+      itemGlow: { enabled: true, color: 'rgba(16,185,129,0.45)', intensity: 10, innerGlow: true },
+      glassmorphism: { enabled: false, blur: 16, tint: 'rgba(255,255,255,0.05)', borderGlow: 'rgba(255,255,255,0.14)' },
+      pulseMarkers: { enabled: false, color: 'rgba(16,185,129,0.9)', size: 8, speed: 1400 },
     },
   },
 };

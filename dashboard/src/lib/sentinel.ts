@@ -50,9 +50,20 @@ class PocketSentinel {
   public init() {
     if (this.initialized || typeof window === 'undefined') return;
 
+    if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+      this.config.reportToBackend = false;
+    }
+
     // Capture unhandled promise rejections
     window.addEventListener('unhandledrejection', (event) => {
       const reason = event.reason;
+
+      // Ignore DOM Event objects that accidentally end up as rejection reasons
+      if (reason instanceof Event) {
+        event.preventDefault();
+        return;
+      }
+
       const isAbortError =
         reason?.name === "AbortError" ||
         String(reason?.message || "").includes("aborted");
@@ -198,6 +209,8 @@ class PocketSentinel {
        error.message.includes('AI Service') ||
        error.message.includes('localhost:8123') ||
        error.message.includes('localhost:8000') ||
+       String(error.metadata?.url || '').includes('localhost:8000') ||
+       String(error.metadata?.url || '').includes('/api/s/s2s/track') ||
        String(error.metadata?.url || '').includes('/api/insights') ||
        String(error.metadata?.url || '').includes('/api/rest/events-table'));
 

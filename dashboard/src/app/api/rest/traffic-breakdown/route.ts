@@ -5,7 +5,7 @@ import {
   parsePropertyFiltersFromURL,
   buildPropertyFilterConditions,
   safeISODate,
-  sqlStringLiteral,
+  sqlDateTime64UTC,
 } from "../../../../lib/propertyFilterUtils";
 
 const CLICKHOUSE_HOST = process.env.CLICKHOUSE_HOST || "localhost";
@@ -63,8 +63,8 @@ export async function GET(request: NextRequest) {
 
   // Build WHERE clause
   const whereConditions = [
-    `timestamp >= ${sqlStringLiteral(startDate)}`,
-    `timestamp <= ${sqlStringLiteral(endDate)}`,
+    `timestamp >= ${sqlDateTime64UTC(startDate)}`,
+    `timestamp <= ${sqlDateTime64UTC(endDate)}`,
     ...propertyFilterConditions
   ];
 

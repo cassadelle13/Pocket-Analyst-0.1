@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { safeISODate, sqlStringLiteral } from "../../../../lib/propertyFilterUtils";
+import { safeISODate, sqlDateTime64UTC } from "../../../../lib/propertyFilterUtils";
 
 async function queryClickHouse(query: string) {
   const hosts = [process.env.CLICKHOUSE_HOST || "storage", "localhost"];
@@ -41,8 +41,8 @@ export async function GET(request: NextRequest) {
       coalesce(event_name, 'unknown') AS category,
       count() AS value
     FROM events
-    WHERE timestamp >= ${sqlStringLiteral(startDate)}
-      AND timestamp <= ${sqlStringLiteral(endDate)}
+    WHERE timestamp >= ${sqlDateTime64UTC(startDate)}
+      AND timestamp <= ${sqlDateTime64UTC(endDate)}
     GROUP BY category
     ORDER BY value DESC
     LIMIT 20

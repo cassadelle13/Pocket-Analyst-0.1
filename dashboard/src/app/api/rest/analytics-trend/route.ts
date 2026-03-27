@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { safeISODate, sqlStringLiteral, propertyFilterToSQL, parsePropertyFiltersFromURL } from "../../../../lib/propertyFilterUtils";
+import { safeISODate, sqlDateTime64UTC, propertyFilterToSQL, parsePropertyFiltersFromURL } from "../../../../lib/propertyFilterUtils";
 
 import { apiClient } from "../../../../lib/api-client";
 
@@ -74,8 +74,8 @@ export async function GET(request: NextRequest) {
         sumOrNull(toFloat64OrNull(JSONExtractString(properties, 'amount'))) AS revenue_b,
         countIf(event_name = 'purchase') AS purchases
       FROM events
-      WHERE timestamp >= ${sqlStringLiteral(startDate)}
-        AND timestamp <= ${sqlStringLiteral(endDate)}
+      WHERE timestamp >= ${sqlDateTime64UTC(startDate)}
+        AND timestamp <= ${sqlDateTime64UTC(endDate)}
         ${whereExtra}
       GROUP BY ts
       ORDER BY ts

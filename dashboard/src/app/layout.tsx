@@ -14,6 +14,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: `
+          window.addEventListener('unhandledrejection', function(e) {
+            if (e.reason instanceof Event) { e.preventDefault(); }
+          });
+        `}} />
+      </head>
       <body className="antialiased font-sans bg-slate-950">
         <ErrorBoundary>
           <Suspense fallback={<div className="min-h-screen bg-slate-950" />}>

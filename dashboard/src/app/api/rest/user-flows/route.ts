@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { sqlStringLiteral, safeISODate } from "../../../../lib/propertyFilterUtils";
+import { sqlDateTime64UTC, safeISODate } from "../../../../lib/propertyFilterUtils";
 
 import { apiClient } from "../../../../lib/api-client";
 
@@ -22,8 +22,8 @@ async function queryClickHouse(query: string): Promise<any[]> {
         }
       );
       
-      if (response.error) continue;
-      return response.data?.data || [];
+      if ((response as any).error) continue;
+      return (response as any).data?.data || [];
     } catch {
       continue;
     }
@@ -58,8 +58,8 @@ export async function GET(request: NextRequest) {
         timestamp,
         neighbor(event_name, 1) OVER (PARTITION BY user_id ORDER BY timestamp) as next_event
       FROM events
-      WHERE timestamp >= ${sqlStringLiteral(startDate)}
-        AND timestamp <= ${sqlStringLiteral(endDate)}
+      WHERE timestamp >= ${sqlDateTime64UTC(startDate)}
+        AND timestamp <= ${sqlDateTime64UTC(endDate)}
         AND user_id != ''
       ORDER BY user_id, timestamp
     ),
@@ -102,8 +102,8 @@ export async function GET(request: NextRequest) {
         timestamp,
         neighbor(event_name, 1) OVER (PARTITION BY user_id ORDER BY timestamp) as next_event
       FROM events
-      WHERE timestamp >= ${sqlStringLiteral(startDate)}
-        AND timestamp <= ${sqlStringLiteral(endDate)}
+      WHERE timestamp >= ${sqlDateTime64UTC(startDate)}
+        AND timestamp <= ${sqlDateTime64UTC(endDate)}
         AND user_id != ''
       ORDER BY user_id, timestamp
     ),

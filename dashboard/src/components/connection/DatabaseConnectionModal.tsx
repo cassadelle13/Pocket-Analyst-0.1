@@ -21,15 +21,16 @@ import { NetworkStep } from "./steps/NetworkStep";
 import { SSLStep } from "./steps/SSLStep";
 import { AdvancedPropertiesStep } from "./steps/AdvancedPropertiesStep";
 import { ReviewStep } from "./steps/ReviewStep";
-import { ConnectionPreset } from "../../types/connection";
+import { ConnectionPayload, ConnectionPreset } from "../../types/connection";
 
 interface DatabaseConnectionModalProps {
   isOpen: boolean;
-  variant: "primary" | "schema" | "vector" | "warehouse" | "cloud" | "streaming";
+  variant?: "primary" | "schema" | "vector" | "warehouse" | "cloud" | "streaming";
   onClose: () => void;
+  onConnected?: (driverId: string, driverName: string, driverCategories: string[]) => void;
 }
 
-export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseConnectionModalProps) {
+export function DatabaseConnectionModal({ isOpen, variant = "primary", onClose, onConnected }: DatabaseConnectionModalProps) {
   const { isDemoMode } = useDemoMode();
   const { connect, isConnecting } = useConnectionState();
   
@@ -56,6 +57,7 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
     removeAdvancedProperty,
     setSelectedDriver,
     isDriverConnectable,
+    applyPreset,
     reset
   } = useWizardState();
 
@@ -96,6 +98,26 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
     setStatusLog(prev => [...prev.slice(-20), `[${new Date().toLocaleTimeString()}] ${message}`]);
   }, []);
 
+  const buildConnectionPayload = useCallback((): ConnectionPayload => {
+    return {
+      type: selectedDriver.connectivity.protocol,
+      host: basicSettings.host.trim(),
+      port: Number(basicSettings.port),
+      database: basicSettings.database.trim(),
+      user: basicSettings.user.trim(),
+      password: basicSettings.password,
+      ssh: sshConfig,
+      proxy: proxyConfig,
+      ssl: sslConfig,
+      properties: advancedProperties.properties
+        .filter((prop) => prop.key.trim().length)
+        .reduce<Record<string, string>>((acc, prop) => {
+          acc[prop.key.trim()] = prop.value;
+          return acc;
+        }, {}),
+    };
+  }, [advancedProperties.properties, basicSettings, proxyConfig, selectedDriver.connectivity.protocol, sshConfig, sslConfig]);
+
   const handleTestConnection = useCallback(async () => {
     if (!selectedDriver || !basicSettings.host) return;
     
@@ -105,8 +127,17 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
     appendLog("Testing connection...");
     
     try {
-      // Simulate connection test
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      const payload = buildConnectionPayload();
+      const res = await fetch("/api/test-connection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ connection: payload }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = String((json as any)?.error ?? `Connection test failed (${res.status})`);
+        throw new Error(err);
+      }
       setProgressStage(2);
       appendLog("Connection successful!");
     } catch (err) {
@@ -117,7 +148,7 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
     } finally {
       setTesting(false);
     }
-  }, [selectedDriver, basicSettings, appendLog]);
+  }, [appendLog, basicSettings.host, buildConnectionPayload, selectedDriver]);
 
   const handleConnect = useCallback(async () => {
     if (!selectedDriver || !basicSettings.host) return;
@@ -128,8 +159,6 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
     appendLog("Establishing secure connection...");
     
     try {
-      // Simulate connection
-      await new Promise(resolve => setTimeout(resolve, 3000));
       await connect({
         driver: selectedDriver,
         basicSettings,
@@ -141,18 +170,21 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
       setProgressStage(3);
       appendLog("Connection established successfully!");
       setTimeout(() => {
+        if (onConnected && selectedDriver) {
+          onConnected(selectedDriver.id, selectedDriver.name, selectedDriver.categories);
+        }
         onClose();
         reset();
       }, 1500);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Connection failed";
       setError(message);
-      appendLog(`Ошибка подключения: ${message}`);
+      appendLog(`Connection error: ${message}`);
       setProgressStage(0);
     } finally {
       setConnecting(false);
     }
-  }, [selectedDriver, basicSettings, sshConfig, proxyConfig, sslConfig, advancedProperties, connect, onClose, reset, appendLog]);
+  }, [selectedDriver, basicSettings, sshConfig, proxyConfig, sslConfig, advancedProperties, connect, onClose, onConnected, reset, appendLog]);
 
   const handleSavePreset = useCallback(async () => {
     if (!selectedDriver || !basicSettings.host) return;
@@ -166,11 +198,7 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
         id: Date.now().toString(),
         name: `${selectedDriver.name} - ${basicSettings.host}`,
         driverId: selectedDriver.id,
-        basicSettings,
-        sshConfig,
-        proxyConfig,
-        sslConfig,
-        advancedProperties: advancedProperties.properties,
+        payload: buildConnectionPayload(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
@@ -182,12 +210,13 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
     } finally {
       setIsSavingPreset(false);
     }
-  }, [selectedDriver, basicSettings, sshConfig, proxyConfig, sslConfig, advancedProperties]);
+  }, [selectedDriver, basicSettings.host, buildConnectionPayload]);
 
   const handleApplyPreset = useCallback((preset: ConnectionPreset) => {
-    // Apply preset logic here
-    appendLog(`Applying preset: ${preset.name}`);
-  }, [appendLog]);
+    applyPreset(preset.driverId, preset.payload);
+    setPresetActionMessage(`Preset applied: "${preset.name}"`);
+    appendLog(`Preset applied: ${preset.name}`);
+  }, [appendLog, applyPreset]);
 
   const handleDeletePreset = useCallback((presetId: string) => {
     setPresets(prev => prev.filter(p => p.id !== presetId));
@@ -267,31 +296,30 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
   const isFinalStep = currentStep === "review";
 
   return (
-    <div className="fixed inset-0 z-[999] flex items-center justify-center">
-      <div
-        className="absolute inset-0 bg-slate-950/80 backdrop-blur-xl"
-        onClick={closeModal}
-      />
+    <div className="fixed inset-0 z-[9999]">
+      <button type="button" className="absolute inset-0 bg-black/40" onClick={closeModal} aria-label="Close" />
 
-      <div className="relative z-10 w-full max-w-6xl max-h-[90vh] rounded-3xl border border-white/10 bg-gradient-to-br from-slate-900/90 via-slate-900/70 to-slate-900/40 shadow-2xl flex flex-col">
-        <div className="flex items-center justify-between px-8 py-6 border-b border-white/10 shrink-0">
-          <div>
-            <p className="text-xs uppercase tracking-[0.4em] text-slate-500 mb-2">DBeaver wizard</p>
-            <h2 className="text-3xl font-semibold text-white flex items-center gap-3">
-              <Plug className="w-7 h-7 text-emerald-400" />
-              {modalTitle}
-            </h2>
-            <p className="text-slate-300 mt-2 text-sm">{modalDescription}</p>
+      <div className="absolute left-1/2 top-1/2 w-[min(1200px,calc(100vw-32px))] h-[min(760px,calc(100vh-32px))] -translate-x-1/2 -translate-y-1/2">
+        <div className="h-full bg-white/5 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/60 rounded-3xl overflow-hidden flex flex-col">
+          <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <Plug className="w-4 h-4 text-emerald-400" />
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-white truncate">{modalTitle}</div>
+                <div className="text-xs text-slate-400 truncate">{modalDescription}</div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={closeModal}
+              className="p-2 rounded-xl text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
+              title="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
-          <button
-            onClick={closeModal}
-            className="p-2 rounded-2xl border border-white/10 text-slate-400 hover:text-white hover:border-white/30"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
 
-        <div className="flex-1 overflow-y-auto px-8 py-6">
+          <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 custom-scrollbar">
           <div className="grid grid-cols-12 gap-6">
             <div className="col-span-12 lg:col-span-3 space-y-4">
               <StepIndicator 
@@ -300,7 +328,7 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
               />
               {isDemoMode && (
                 <p className="text-xs text-emerald-400 flex items-center gap-2">
-                  <Sparkles className="w-4 h-4" /> Demo mode: ответы мгновенные
+                  <Sparkles className="w-4 h-4" /> Demo mode: instant responses
                 </p>
               )}
 
@@ -308,7 +336,6 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Presets</p>
-                    <p className="text-[11px] text-slate-500">Сохраняй и переиспользуй подключения</p>
                   </div>
                   <button
                     onClick={handleSavePreset}
@@ -318,14 +345,15 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
                     {isSavingPreset ? "Saving…" : "Save"}
                   </button>
                 </div>
+                <p className="text-[11px] text-slate-500">Save and reuse your connections</p>
                 {presetActionMessage && (
                   <p className="text-[11px] text-emerald-300">{presetActionMessage}</p>
                 )}
                 {presetsError && <p className="text-[11px] text-red-300">{presetsError}</p>}
                 <div className="space-y-2 max-h-40 overflow-y-auto custom-scrollbar">
-                  {presetsLoading && <p className="text-xs text-slate-500">Загружаем пресеты…</p>}
+                  {presetsLoading && <p className="text-xs text-slate-500">Loading presets...</p>}
                   {!presetsLoading && presets.length === 0 && (
-                    <p className="text-xs text-slate-500">Пока нет сохраненных пресетов</p>
+                    <p className="text-xs text-slate-500">No saved presets yet</p>
                   )}
                   {presets.map((preset) => (
                     <div key={preset.id} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm">
@@ -343,7 +371,7 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
                           ✕
                         </button>
                       </div>
-                      <p className="text-[10px] text-slate-500">Обновлен {new Date(preset.updatedAt).toLocaleDateString()}</p>
+                      <p className="text-[10px] text-slate-500">Updated {new Date(preset.updatedAt).toLocaleDateString()}</p>
                     </div>
                   ))}
                 </div>
@@ -355,22 +383,24 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
                 {renderStep()}
               </div>
 
-              <div className="rounded-2xl border border-white/10 bg-black/30 p-5 h-40 overflow-auto custom-scrollbar">
-                <div className="flex items-center gap-2 text-xs text-slate-400 uppercase tracking-[0.3em] mb-3">
-                  <Sparkles className="w-3 h-3" /> Event Log
+              {isFinalStep && (
+                <div className="rounded-2xl border border-white/10 bg-black/30 p-5 h-40 overflow-auto custom-scrollbar">
+                  <div className="flex items-center gap-2 text-xs text-slate-400 uppercase tracking-[0.3em] mb-3">
+                    <Sparkles className="w-3 h-3" /> Event Log
+                  </div>
+                  {statusLog.length === 0 ? (
+                    <p className="text-slate-500 text-sm">Log is empty. Test the connection or click "Connect".</p>
+                  ) : (
+                    <ul className="space-y-1 text-sm text-slate-200">
+                      {statusLog.slice(-6).map((line, idx) => (
+                        <li key={`${line}-${idx}`} className="font-mono text-xs text-slate-300">
+                          {line}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
-                {statusLog.length === 0 ? (
-                  <p className="text-slate-500 text-sm">Журнал пуст. Проверь соединение или нажми "Подключить".</p>
-                ) : (
-                  <ul className="space-y-1 text-sm text-slate-200">
-                    {statusLog.slice(-6).map((line, idx) => (
-                      <li key={`${line}-${idx}`} className="font-mono text-xs text-slate-300">
-                        {line}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              )}
 
               {error && (
                 <div className="flex items-center gap-3 rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -379,11 +409,7 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
                 </div>
               )}
 
-              <div className="flex flex-col md:flex-row md:items-center gap-3 justify-between">
-                <div className="text-xs text-slate-400 flex items-center gap-2">
-                  <Plug className="w-4 h-4 text-emerald-400" />
-                  Secure channel: TLS + Audit trail enabled
-                </div>
+              <div className="flex flex-col md:flex-row md:items-center gap-3 justify-end">
                 <div className="flex flex-wrap gap-2">
                   <button
                     onClick={prevStep}
@@ -417,13 +443,14 @@ export function DatabaseConnectionModal({ isOpen, variant, onClose }: DatabaseCo
                         className="flex items-center gap-2 rounded-2xl border border-emerald-400/40 bg-gradient-to-r from-emerald-500/50 to-green-500/50 px-5 py-2 text-sm font-semibold text-white hover:from-emerald-500 hover:to-green-500 disabled:opacity-60"
                       >
                         {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                        Подключить
+                        Connect
                       </button>
                     </>
                   )}
                 </div>
               </div>
             </div>
+          </div>
           </div>
         </div>
       </div>

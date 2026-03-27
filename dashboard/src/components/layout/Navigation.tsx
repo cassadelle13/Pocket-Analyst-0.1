@@ -5,21 +5,14 @@ import { usePathname } from "next/navigation";
 import { 
   HomeIcon,
   LayoutDashboardIcon, 
-  BrainIcon, 
-  CalendarIcon, 
+  MessageSquareIcon,
   SettingsIcon,
-  BarChart3Icon,
-  UsersIcon,
-  ActivityIcon,
-  DatabaseIcon,
-  ScrollTextIcon,
-  LineChartIcon
 } from "lucide-react";
 
 const navigation = [
   { name: "Home", href: "/home", icon: HomeIcon },
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboardIcon },
-  { name: "Chart Builder", href: "/chart-builder", icon: LineChartIcon },
+  { name: "DataTalk", href: "/datatalk", icon: MessageSquareIcon },
   { name: "Settings", href: "/settings", icon: SettingsIcon },
 ];
 

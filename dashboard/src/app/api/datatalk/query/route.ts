@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { getConnectionSecretForAgent, insertQueryAudit } from "../../../../lib/datatalkMetaDb";
+import { createRequestId, logQueryEvent, recordQueryMetric } from "../../../../lib/queryObservability";
 
 
 function getAgentBaseUrl() {
@@ -13,13 +14,21 @@ function getAgentSecret() {
   return process.env.DATATALK_AGENT_SHARED_SECRET || "";
 }
 
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 export async function POST(request: NextRequest) {
   const startedAt = Date.now();
+  const rid = createRequestId("dtq");
 
   try {
     const body = await request.json();
 
     const connectionId = typeof body?.connectionId === "string" ? body.connectionId : null;
+    if (connectionId && !isUuid(connectionId)) {
+      return NextResponse.json({ error: "Invalid connectionId format" }, { status: 400 });
+    }
     const sqlText = typeof body?.sql === "string" ? body.sql : "";
     const sqlPreview = sqlText ? sqlText.trim().slice(0, 500) : null;
     const sqlSha256 = sqlText ? crypto.createHash("sha256").update(sqlText, "utf8").digest("hex") : null;
@@ -95,7 +104,17 @@ export async function POST(request: NextRequest) {
       } catch {
         // ignore audit failures
       }
-      return NextResponse.json({ error: text || `Agent error ${res.status}` }, { status: 502 });
+      logQueryEvent("warn", "datatalk_query_upstream_error", { rid, status: res.status });
+      recordQueryMetric({
+        route: "/api/datatalk/query",
+        durationMs: Date.now() - startedAt,
+        ok: false,
+        correlationId: rid,
+        extra: { status: res.status },
+      });
+      const failResponse = NextResponse.json({ error: text || `Agent error ${res.status}` }, { status: 502 });
+      failResponse.headers.set("x-correlation-id", rid);
+      return failResponse;
     }
 
     const data = text ? JSON.parse(text) : {};
@@ -117,7 +136,50 @@ export async function POST(request: NextRequest) {
       // ignore audit failures
     }
 
-    return NextResponse.json(data, { status: 200 });
+    const shouldStream = body?.stream === true;
+    if (shouldStream && Array.isArray((data as any)?.data?.rows)) {
+      const rows = (data as any).data.rows as unknown[][];
+      const cols = Array.isArray((data as any)?.data?.columns) ? (data as any).data.columns : [];
+      const enc = new TextEncoder();
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(enc.encode(JSON.stringify({ columns: cols }) + "\n"));
+          for (const row of rows) {
+            controller.enqueue(enc.encode(JSON.stringify({ row }) + "\n"));
+          }
+          controller.enqueue(enc.encode(JSON.stringify({ rowCount: rows.length }) + "\n"));
+          controller.close();
+        },
+      });
+      recordQueryMetric({
+        route: "/api/datatalk/query",
+        durationMs: Date.now() - startedAt,
+        ok: true,
+        correlationId: rid,
+        extra: { streamed: true, rowCount: rows.length },
+      });
+      return new NextResponse(stream, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "Cache-Control": "no-store",
+          "x-correlation-id": rid,
+        },
+      });
+    }
+
+    recordQueryMetric({
+      route: "/api/datatalk/query",
+      durationMs: Date.now() - startedAt,
+      ok: true,
+      correlationId: rid,
+      extra: {
+        rowCount: Array.isArray((data as any)?.data?.rows) ? (data as any).data.rows.length : null,
+      },
+    });
+    const okResponse = NextResponse.json(data, { status: 200 });
+    okResponse.headers.set("x-correlation-id", rid);
+    return okResponse;
   } catch (err: unknown) {
     try {
       await insertQueryAudit({
@@ -130,6 +192,16 @@ export async function POST(request: NextRequest) {
       // ignore audit failures
     }
     const message = err instanceof Error ? err.message : "Failed to proxy query";
-    return NextResponse.json({ error: message }, { status: 400 });
+    logQueryEvent("error", "datatalk_query_failed", { rid, message });
+    recordQueryMetric({
+      route: "/api/datatalk/query",
+      durationMs: Date.now() - startedAt,
+      ok: false,
+      correlationId: rid,
+      extra: { message },
+    });
+    const failResponse = NextResponse.json({ error: message }, { status: 400 });
+    failResponse.headers.set("x-correlation-id", rid);
+    return failResponse;
   }
 }

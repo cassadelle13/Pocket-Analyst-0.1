@@ -13,6 +13,8 @@ export function JitsuProvider({ children }: JitsuProviderProps) {
 
   useEffect(() => {
     // Initialize Jitsu with environment variables
+    const enabled = (process.env.NEXT_PUBLIC_JITSU_ENABLED === "true") || (process.env.NODE_ENV === "production");
+    if (!enabled) return;
     const host = process.env.NEXT_PUBLIC_JITSU_HOST || "http://localhost:8000";
     const writeKey = process.env.NEXT_PUBLIC_JITSU_WRITE_KEY || "demo_write_key";
 
@@ -21,6 +23,8 @@ export function JitsuProvider({ children }: JitsuProviderProps) {
 
   // Track page views on route change
   useEffect(() => {
+    const enabled = (process.env.NEXT_PUBLIC_JITSU_ENABLED === "true") || (process.env.NODE_ENV === "production");
+    if (!enabled) return;
     jitsu.page(pathname);
   }, [pathname]);
 

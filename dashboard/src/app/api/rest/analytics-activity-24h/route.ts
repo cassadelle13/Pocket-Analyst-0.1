@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { safeISODate, sqlStringLiteral } from "../../../../lib/propertyFilterUtils";
+import { safeISODate, sqlDateTime64UTC } from "../../../../lib/propertyFilterUtils";
 
 async function queryClickHouse(query: string) {
   const hosts = [process.env.CLICKHOUSE_HOST || "storage", "localhost"];
@@ -43,8 +43,8 @@ export async function GET(request: NextRequest) {
              uniqExact(user_id) AS users,
              countIf(event_name = 'error') AS errors
       FROM events
-      WHERE timestamp >= ${sqlStringLiteral(startDate)}
-        AND timestamp <= ${sqlStringLiteral(endDate)}
+      WHERE timestamp >= ${sqlDateTime64UTC(startDate)}
+        AND timestamp <= ${sqlDateTime64UTC(endDate)}
       GROUP BY ts
       ORDER BY ts
     )

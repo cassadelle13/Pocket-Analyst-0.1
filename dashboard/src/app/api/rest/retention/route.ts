@@ -8,7 +8,7 @@ import {
   parsePropertyFiltersFromURL,
   buildPropertyFilterConditions,
   safeISODate,
-  sqlStringLiteral,
+  sqlDateTime64UTC,
 } from "../../../../lib/propertyFilterUtils";
 
 async function queryClickHouse(query: string) {
@@ -55,8 +55,8 @@ export async function GET(request: NextRequest) {
   const propertyFilterConditions = buildPropertyFilterConditions(propertyFilters);
 
   const baseWhere = [
-    `timestamp >= ${sqlStringLiteral(startDate)}`,
-    `timestamp <= ${sqlStringLiteral(endDate)}`,
+    `timestamp >= ${sqlDateTime64UTC(startDate)}`,
+    `timestamp <= ${sqlDateTime64UTC(endDate)}`,
     ...propertyFilterConditions,
   ];
   const whereClause = baseWhere.length ? `WHERE ${baseWhere.join(" AND ")}` : "";

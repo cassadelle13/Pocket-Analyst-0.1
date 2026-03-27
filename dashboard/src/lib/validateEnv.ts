@@ -38,6 +38,7 @@ const ENV_SCHEMA: EnvConfig[] = [
   
   // App
   { name: 'NEXT_PUBLIC_APP_URL', required: false, description: 'Public app URL', defaultValue: 'http://localhost:3000' },
+  { name: 'NEXT_PUBLIC_EXPR_ENGINE', required: false, description: 'Unified Expression Engine rollout flag (off|on)', defaultValue: 'off' },
 ];
 
 export class EnvValidationError extends Error {

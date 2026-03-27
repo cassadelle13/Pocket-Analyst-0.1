@@ -65,12 +65,13 @@ services:
       - pocketanalyst
 
   postgres-init:
-    image: postgres:14-alpine
+    image: postgres:16-alpine
     container_name: datatalk-postgres-init
     depends_on:
       - postgres
     environment:
       - PGPASSWORD=postgres
+      - PGHOST=postgres
     volumes:
       - ./datatalk-db-init/postgres:/init:ro
     command: >
@@ -79,7 +80,9 @@ services:
           pg_isready -h postgres -U postgres -d postgres && break;
           sleep 2;
         done;
-        psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 -f /init/02_init_idempotent.sql
+        sh /init/01_restore_musgen.sh;
+        psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 -f /init/02_init_idempotent.sql;
+        psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 -f /init/03_projects_table.sql
       "
     restart: "no"
     networks:
@@ -121,6 +124,16 @@ services:
       - MSSQL_SA_PASSWORD=YourStrong!Passw0rd
     volumes:
       - datatalk_mssql_data:/var/opt/mssql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S 127.0.0.1,1433 -U sa -P $$MSSQL_SA_PASSWORD -C -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -129,10 +142,11 @@ services:
       - pocketanalyst
 
   mssql-init:
-    image: mcr.microsoft.com/mssql-tools:latest
+    image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: datatalk-mssql-init
     depends_on:
-      - mssql
+      mssql:
+        condition: service_healthy
     environment:
       - MSSQL_SA_PASSWORD=YourStrong!Passw0rd
     volumes:
@@ -140,16 +154,7 @@ services:
     command: >
       bash -lc "
         set -e;
-        ready=0;
-        for i in {1..120}; do
-          /opt/mssql-tools/bin/sqlcmd -S mssql,1433 -U sa -P \"$${MSSQL_SA_PASSWORD}\" -l 30 -C -Q 'SELECT 1' && ready=1 && break;
-          sleep 2;
-        done;
-        if [ \"$$ready\" -ne 1 ]; then
-          echo 'MSSQL did not become ready in time';
-          exit 1;
-        fi;
-        /opt/mssql-tools/bin/sqlcmd -S mssql,1433 -U sa -P \"$${MSSQL_SA_PASSWORD}\" -l 30 -C -i /init/01_init.sql
+        /opt/mssql-tools18/bin/sqlcmd -S mssql,1433 -U sa -P \"$${MSSQL_SA_PASSWORD}\" -l 30 -C -i /init/01_init.sql
       "
     restart: "no"
     networks:
@@ -168,6 +173,9 @@ services:
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_PASSWORD=
       - LITELLM_MODEL=gpt-4o-mini
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=gpt-4o-mini
+      - WHISPER_MODEL=turbo
     depends_on:
       storage:
         condition: service_healthy
@@ -242,9 +250,14 @@ services:
   dashboard:
     build:
       context: ./dashboard
+      args:
+        CLICKHOUSE_HOST: storage
+        CLICKHOUSE_DATABASE: analytics
+        DATATALK_AGENT_URL: http://datatalk-agent:9010
+        DATATALK_AGENT_SHARED_SECRET: dev-agent-secret
     container_name: pocketanalyst-dashboard
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       - NEXT_PUBLIC_AI_API_URL=http://localhost:8004
       - AI_SERVICE_URL=http://ai-service:8000

@@ -1,5 +1,4 @@
 /* Local font imports for offline-first functionality */
-@import url('/fonts/inter.css');
 
 @tailwind base;
 @tailwind components;
@@ -112,6 +111,11 @@
   }
   
   /* Custom scrollbar */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(71, 85, 105, 0.5) rgba(30, 41, 59, 0.5);
+  }
+
   .custom-scrollbar::-webkit-scrollbar {
     width: 6px;
   }
@@ -433,6 +437,23 @@
   [role="listbox"]::-webkit-scrollbar-thumb:hover {
     background: rgba(100, 116, 139, 0.7);
   }
+
+  /* Native <select> dark theme (for browser dropdowns) */
+  .dl-native-select-dark {
+    color-scheme: dark;
+  }
+
+  .dl-native-select-dark:focus {
+    outline: none;
+    box-shadow:
+      0 0 0 3px rgba(16, 185, 129, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .dl-native-select-dark option {
+    background-color: rgb(15, 23, 42);
+    color: rgb(226, 232, 240);
+  }
 }
 
 /* Oil spill blob animation */
@@ -456,4 +477,40 @@
 
 .animate-blob {
   animation: blob 20s infinite ease-in-out;
+}
+
+/* Line clamp utility */
+.line-clamp-2 {
+  overflow: hidden;
+  display: -webkit-box;
+  display: box;
+  -webkit-box-orient: vertical;
+  box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+/* Dark scrollbar for all elements */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(30, 41, 59, 0.5);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.5);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.7);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(71, 85, 105, 0.5) rgba(30, 41, 59, 0.5);
 }

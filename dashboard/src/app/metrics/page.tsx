@@ -6,15 +6,7 @@ import {
   Card,
   Text,
   Title,
-  Flex,
-  Badge,
   Grid,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeaderCell,
-  TableRow,
   Metric,
   AreaChart,
   BarList,
@@ -23,7 +15,6 @@ import {
   Callout,
 } from "@tremor/react";
 import { RequireRole } from "../../components/auth";
-import { RetentionChart } from "../../components/widgets";
 import type { ActivityData, TopEventRow, MetricsResponse, TrafficSlice, FunnelRow } from "../../types/api";
 
 interface ActivityRow {
@@ -67,16 +58,6 @@ export default function MetricsPage() {
       cancelled = true;
     };
   }, []);
-
-  const retentionData = useMemo(
-    () =>
-      (metrics?.retention || []).map((item) => ({
-        day: item.day,
-        retention: Number(item.retention ?? 0),
-        benchmark: 0,
-      })),
-    [metrics?.retention],
-  );
 
   const funnelRow = funnelList.data?.data?.[0];
   const funnelBar = useMemo(
@@ -178,12 +159,6 @@ export default function MetricsPage() {
           )}
         </Card>
 
-        <Card className="bg-slate-900/40 border border-slate-800">
-          <Title className="text-white">Retention</Title>
-          <div className="mt-4">
-            <RetentionChart data={retentionData.length ? retentionData : undefined} />
-          </div>
-        </Card>
       </div>
     </RequireRole>
   );

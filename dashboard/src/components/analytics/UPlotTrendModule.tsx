@@ -40,6 +40,15 @@ function UPlotTrendModule({ data, xKey, series, forecast, height = 360, onPointC
   const bus = useChartBus();
   const { syncEnabled } = useChartSyncSettings();
 
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const seriesRef = useRef(series);
+  seriesRef.current = series;
+  const xKeyRef = useRef(xKey);
+  xKeyRef.current = xKey;
+  const syncEnabledRef = useRef(syncEnabled);
+  syncEnabledRef.current = syncEnabled;
+
   const applyingRemoteRef = useRef(false);
   const lastHoverTsRef = useRef(0);
   const lastZoomTsRef = useRef(0);
@@ -143,25 +152,28 @@ function UPlotTrendModule({ data, xKey, series, forecast, height = 360, onPointC
         setCursor: [
           (u) => {
             const idx = u.cursor.idx ?? -1;
-            if (idx < 0 || !data[idx]) {
+            const dataNow = dataRef.current;
+            const seriesNow = seriesRef.current;
+            const xKeyNow = xKeyRef.current;
+            if (idx < 0 || !dataNow[idx]) {
               setTip((t) => ({ ...t, show: false }));
               return;
             }
-            const ts = toNum(data[idx][xKey]);
+            const ts = toNum(dataNow[idx][xKeyNow]);
             const left = (u.cursor.left ?? 0) + 12; // slight offset
             const top = (u.cursor.top ?? 0) + 12;
 
             // Build simple tooltip HTML from original data
             const dt = new Date(ts).toLocaleString();
-            const rows = series.map((s) => {
-              const val = toNum(data[idx][s.key]);
+            const rows = seriesNow.map((s) => {
+              const val = toNum(dataNow[idx][s.key]);
               return `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:${s.stroke}">●</span><span>${s.name}</span><b>${Number(val).toLocaleString()}</b></div>`;
             }).join("");
             const html = `<div style="min-width:220px"><div style="font-weight:700;margin-bottom:6px">${dt}</div>${rows}</div>`;
 
             setTip({ show: true, x: left, y: top, html });
             // Publish hover to bus (throttled, only when syncEnabled, and skip if applying remote)
-            if (!applyingRemoteRef.current && syncEnabled) {
+            if (!applyingRemoteRef.current && syncEnabledRef.current) {
               const now = performance.now();
               if (now - lastHoverTsRef.current >= 40) {
                 lastHoverTsRef.current = now;
@@ -176,7 +188,7 @@ function UPlotTrendModule({ data, xKey, series, forecast, height = 360, onPointC
             const rng = u.scales.x;
             const min = (rng as any).min as number;
             const max = (rng as any).max as number;
-            if (Number.isFinite(min) && Number.isFinite(max) && syncEnabled) {
+            if (Number.isFinite(min) && Number.isFinite(max) && syncEnabledRef.current) {
               const now = performance.now();
               if (now - lastZoomTsRef.current >= 120) {
                 lastZoomTsRef.current = now;
@@ -187,7 +199,7 @@ function UPlotTrendModule({ data, xKey, series, forecast, height = 360, onPointC
         ],
       },
     };
-  }, [height, series, data, xKey, bus, chartId, groupId]);
+  }, [height, series, bus, chartId, groupId]);
 
   // Store onPointClick in ref to avoid recreating event listeners
   const onPointClickRef = useRef(onPointClick);
@@ -195,57 +207,52 @@ function UPlotTrendModule({ data, xKey, series, forecast, height = 360, onPointC
     onPointClickRef.current = onPointClick;
   }, [onPointClick]);
 
+  // Create plot once and attach listeners once
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
+    if (plotRef.current) return;
+
     const monitor = getPerformanceMonitor();
-    monitor.mark('UPlotTrendModule-render');
+    monitor.mark('UPlotTrendModule-init');
 
-    // Create once
-    if (!plotRef.current) {
-      const plot = new uPlot(opts, uData, host);
-      plotRef.current = plot;
+    const plot = new uPlot(opts, uData, host);
+    plotRef.current = plot;
 
-      const onResize = () => {
-        if (!plotRef.current) return;
-        const w = host.clientWidth;
-        plotRef.current.setSize({ width: w, height });
-      };
-      onResize();
-      window.addEventListener("resize", onResize);
+    const onResize = () => {
+      const p = plotRef.current;
+      if (!p) return;
+      const w = host.clientWidth;
+      p.setSize({ width: w, height });
+    };
+    onResize();
+    window.addEventListener("resize", onResize);
 
-      // Click -> nearest index
-      const onClick = (e: MouseEvent) => {
-        if (!onPointClickRef.current || !plotRef.current) return;
-        const bbox = host.getBoundingClientRect();
-        const xPos = e.clientX - bbox.left;
-        const idx = plotRef.current.posToIdx(xPos);
-        const row = data[idx];
-        if (row) {
-          onPointClickRef.current({ ...(row ?? {}), __series: "Trend" });
-          // Click публикация не синхронизируется, но может использоваться в глобальной логике — публикуем без gating
-          bus.publish({ source: "uplot", action: "click", chartId, groupId, x: row[xKey] as any, meta: { idx, row } });
-        }
-      };
-      host.addEventListener("click", onClick);
+    const onClick = (e: MouseEvent) => {
+      const p = plotRef.current;
+      if (!onPointClickRef.current || !p) return;
+      const bbox = host.getBoundingClientRect();
+      const xPos = e.clientX - bbox.left;
+      const idx = p.posToIdx(xPos);
+      const row = data[idx];
+      if (row) {
+        onPointClickRef.current({ ...(row ?? {}), __series: "Trend" });
+        bus.publish({ source: "uplot", action: "click", chartId, groupId, x: row[xKey] as any, meta: { idx, row } });
+      }
+    };
+    host.addEventListener("click", onClick);
 
-      // Store cleanup function
-      cleanupRef.current = () => {
-        window.removeEventListener("resize", onResize);
-        host.removeEventListener("click", onClick);
-        if (plotRef.current) {
-          plotRef.current.destroy();
-          plotRef.current = null;
-        }
-      };
-    } else {
-      // Update existing plot
-      plotRef.current.setData(uData);
-      plotRef.current.setSize({ width: host.clientWidth, height });
-    }
+    cleanupRef.current = () => {
+      window.removeEventListener("resize", onResize);
+      host.removeEventListener("click", onClick);
+      try {
+        plotRef.current?.destroy();
+      } catch {}
+      plotRef.current = null;
+    };
 
-    monitor.measure('UPlotTrendModule-render');
+    monitor.measure('UPlotTrendModule-init');
 
     return () => {
       if (cleanupRef.current) {
@@ -253,7 +260,22 @@ function UPlotTrendModule({ data, xKey, series, forecast, height = 360, onPointC
         cleanupRef.current = null;
       }
     };
-  }, [opts, uData, height, data]);
+  }, [bus, chartId, data, groupId, height, opts, uData, xKey]);
+
+  // Update plot data/size without recreating
+  useEffect(() => {
+    const host = hostRef.current;
+    const p = plotRef.current;
+    if (!host || !p) return;
+
+    const monitor = getPerformanceMonitor();
+    monitor.mark('UPlotTrendModule-update');
+    try {
+      p.setData(uData);
+      p.setSize({ width: host.clientWidth, height });
+    } catch {}
+    monitor.measure('UPlotTrendModule-update');
+  }, [uData, height]);
 
   // Subscribe to bus to apply interactions from peer uPlot charts in same group
   useEffect(() => {

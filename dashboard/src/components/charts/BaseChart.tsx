@@ -277,12 +277,16 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
       // Dispose chart instance with proper cleanup
       if (chartRef.current) {
         try {
-          // Clear all event listeners
+          // Clear all event listeners first
           chartRef.current.off();
+          // Clear dataZoom and toolbox before dispose to avoid internal state errors
+          try {
+            chartRef.current.setOption({ dataZoom: [], toolbox: { show: false } }, { notMerge: false, lazyUpdate: false });
+          } catch {}
           // Dispose chart
           chartRef.current.dispose();
         } catch (e) {
-          console.error('[BaseChart] Error disposing chart:', e);
+          // Silently ignore dispose errors — ECharts internal state may already be cleared
         }
         chartRef.current = null;
       }
@@ -386,6 +390,12 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
         case 'ai-config': {
           try {
             window.dispatchEvent(new CustomEvent('chart:ai-config', { detail: { chartId, option: optionRef.current } }));
+          } catch {}
+          break;
+        }
+        case 'manual-config': {
+          try {
+            window.dispatchEvent(new CustomEvent('chart:manual-config', { detail: { chartId, option: optionRef.current } }));
           } catch {}
           break;
         }

@@ -6,7 +6,7 @@ import { Card, Text, Title, Button, Select, SelectItem, TextInput, Badge } from 
 import { RequireRole } from "../../components/auth";
 import { useRole } from "../../providers";
 
-type DbType = "clickhouse" | "postgres" | "mysql" | "mssql";
+type DbType = "clickhouse" | "postgres" | "mysql" | "mssql" | "csv";
 
 type ConnectionConfig = {
   type: DbType;
@@ -61,6 +61,8 @@ function roleToAgentRole(appRole: string): AgentRole {
 
 function defaultConnection(type: DbType): ConnectionConfig {
   switch (type) {
+    case "csv":
+      return { type, host: "storage", port: 8123, database: "analytics", user: "default", password: "" };
     case "clickhouse":
       return { type, host: "storage", port: 8123, database: "analytics", user: "default", password: "" };
     case "postgres":
@@ -281,8 +283,12 @@ export default function DataTalkPage() {
     setConnection(nextConn);
     setSelectedSavedConnectionId("");
 
-    if (next === "clickhouse") {
-      setSql("SELECT count(*) AS c FROM analytics.events");
+    if (next === "clickhouse" || next === "csv") {
+      if (next === "csv") {
+        setSql("SELECT * FROM analytics.online_retail LIMIT 10");
+      } else {
+        setSql("SELECT count(*) AS c FROM analytics.events");
+      }
     } else {
       setSql("SELECT TOP 10 * FROM datatalk.sample_events");
       if (next === "postgres" || next === "mysql") {
@@ -460,6 +466,7 @@ export default function DataTalkPage() {
               <div className="md:col-span-1">
                 <Text className="text-slate-300 mb-2">DB</Text>
                 <Select value={dbType} onValueChange={(v) => onDbTypeChange(v as DbType)}>
+                  <SelectItem value="csv">CSV</SelectItem>
                   <SelectItem value="clickhouse">ClickHouse</SelectItem>
                   <SelectItem value="postgres">Postgres</SelectItem>
                   <SelectItem value="mysql">MySQL</SelectItem>
@@ -472,7 +479,7 @@ export default function DataTalkPage() {
                 <TextInput
                   value={connection.host}
                   onChange={(e) => setConnection((c) => ({ ...c, host: e.target.value }))}
-                  placeholder="storage / postgres / mysql / mssql"
+                  placeholder="storage / postgres / mysql / mssql / csv-source"
                 />
               </div>
 

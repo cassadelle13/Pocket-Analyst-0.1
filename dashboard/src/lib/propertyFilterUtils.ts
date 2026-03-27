@@ -14,6 +14,35 @@ export function sqlStringLiteral(value: string): string {
   return `'${escapeSQLString(value)}'`;
 }
 
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function pad3(n: number) {
+  return String(n).padStart(3, "0");
+}
+
+/**
+ * ClickHouse-friendly UTC DateTime64 literal.
+ *
+ * ClickHouse DateTime64 comparisons can fail if we pass raw ISO strings with `Z`.
+ * This helper converts an ISO date into:
+ *   toDateTime64('YYYY-MM-DD HH:MM:SS.mmm', 3, 'UTC')
+ */
+export function sqlDateTime64UTC(iso: string): string {
+  const ms = Date.parse(iso);
+  const d = new Date(Number.isFinite(ms) ? ms : Date.now());
+  const y = d.getUTCFullYear();
+  const mo = pad2(d.getUTCMonth() + 1);
+  const da = pad2(d.getUTCDate());
+  const hh = pad2(d.getUTCHours());
+  const mm = pad2(d.getUTCMinutes());
+  const ss = pad2(d.getUTCSeconds());
+  const mmm = pad3(d.getUTCMilliseconds());
+  const s = `${y}-${mo}-${da} ${hh}:${mm}:${ss}.${mmm}`;
+  return `toDateTime64(${sqlStringLiteral(s)}, 3, 'UTC')`;
+}
+
 function safePropertyKey(key: string): string {
   const cleaned = String(key).replace(/[^a-zA-Z0-9_]/g, "");
   return cleaned || "_";

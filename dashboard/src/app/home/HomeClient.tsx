@@ -1,56 +1,198 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Card, Text, Title } from "@tremor/react";
-import { Database, Server, Boxes, Warehouse, Cloud, Radio, HomeIcon } from "lucide-react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { HomeIcon, X } from "lucide-react";
 import { DatabaseConnectionStatus } from "../../components/home/DatabaseConnectionStatus";
 import { DatabaseConnectionModal } from "../../components/connection/DatabaseConnectionModal";
+import { DbExplorerModal } from "../../components/dashboard/DbExplorerModal";
+import { MyProjects } from "../../components/home/MyProjects";
+import { useConnectionState } from "../../providers";
 
 type ConnectionVariant = "primary" | "schema" | "vector" | "warehouse" | "cloud" | "streaming";
 
-const DB_TYPE_OPTIONS: { variant: ConnectionVariant; label: string; icon: typeof Database; accent: string }[] = [
-  { variant: "primary", label: "Database", icon: Database, accent: "text-emerald-400" },
-  { variant: "schema", label: "Schema Intelligence", icon: Server, accent: "text-blue-400" },
-  { variant: "vector", label: "Vector Store", icon: Boxes, accent: "text-purple-400" },
-  { variant: "warehouse", label: "Data Warehouse", icon: Warehouse, accent: "text-amber-400" },
-  { variant: "cloud", label: "Cloud Storage", icon: Cloud, accent: "text-cyan-400" },
-  { variant: "streaming", label: "Streaming Pipeline", icon: Radio, accent: "text-rose-400" },
-];
+interface ConnectedModule {
+  driverId: string;
+  driverName: string;
+  displayName: string;
+  variant: ConnectionVariant;
+}
+
+const MODULES_STORAGE_KEY = "pa_home_modules";
+const MAX_SLOTS = 6;
+
+function normalizeConnectionName(value: string): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+/** Map driver categories to the closest ConnectionVariant */
+function categoriesToVariant(categories: string[]): ConnectionVariant {
+  if (categories.includes("stream")) return "streaming";
+  if (categories.includes("cloud")) return "cloud";
+  if (categories.includes("analytic")) return "warehouse";
+  if (categories.includes("nosql")) return "vector";
+  if (categories.includes("newsql")) return "schema";
+  return "primary";
+}
+
+function loadModules(): (ConnectedModule | null)[] {
+  if (typeof window === "undefined") return Array(MAX_SLOTS).fill(null);
+  try {
+    const raw = localStorage.getItem(MODULES_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as (ConnectedModule | null)[];
+      // Ensure array is always MAX_SLOTS length and migrate old data
+      const result = Array(MAX_SLOTS).fill(null);
+      parsed.forEach((m, i) => { 
+        if (i < MAX_SLOTS && m) {
+          // Migrate old modules without displayName / normalize defaults
+          // displayName is the user-editable title (default: "Database Connection")
+          // driverName is shown in the bottom pill (e.g. POSTGRESQL)
+          const normalizedDisplayName =
+            !m.displayName || m.displayName === m.driverName
+              ? "Database Connection"
+              : m.displayName;
+          result[i] = {
+            ...m,
+            displayName: normalizedDisplayName,
+          };
+        }
+      });
+      return result;
+    }
+  } catch { /* ignore */ }
+  return Array(MAX_SLOTS).fill(null);
+}
+
+function saveModules(modules: (ConnectedModule | null)[]) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(MODULES_STORAGE_KEY, JSON.stringify(modules));
+}
 
 export default function HomeClient() {
+  const router = useRouter();
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [connectionModal, setConnectionModal] = useState<{
-    open: boolean;
-    variant: ConnectionVariant;
-  }>({ open: false, variant: "primary" });
-  const [addMenuOpen, setAddMenuOpen] = useState<number | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
 
-  const openConnectionModal = (variant: ConnectionVariant) => {
-    setConnectionModal({ open: true, variant });
-    setAddMenuOpen(null);
-  };
+  // Slots: each can be null (empty) or a connected module
+  const [modules, setModules] = useState<(ConnectedModule | null)[]>(() => loadModules());
 
-  const closeConnectionModal = () => {
-    setConnectionModal((prev) => ({ ...prev, open: false }));
-  };
+  const { activeConnection } = useConnectionState();
+  const [projectsCount, setProjectsCount] = useState(0);
 
-  // Close menu on outside click
+  // Wizard modal state
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [activeSlot, setActiveSlot] = useState<number | null>(null);
+
+  // DB Explorer modal state
+  const [explorerOpen, setExplorerOpen] = useState(false);
+  const [explorerModule, setExplorerModule] = useState<ConnectedModule | null>(null);
+
+  // Persist modules to localStorage
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setAddMenuOpen(null);
-      }
-    };
-    if (addMenuOpen !== null) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [addMenuOpen]);
+    saveModules(modules);
+  }, [modules]);
 
-  
+  // Auto-seed Home slots from currently active backend connection (status API),
+  // so pre-provisioned connections like Online_retail appear without manual wizard.
+  useEffect(() => {
+    const ac = activeConnection;
+    if (!ac?.id) return;
+
+    setModules((prev) => {
+      const arr = Array.isArray(prev) ? [...prev] : Array(MAX_SLOTS).fill(null);
+      const acName = String(ac.name ?? "").trim();
+      const acNameNorm = normalizeConnectionName(acName);
+      let changed = false;
+
+      let targetIdx = arr.findIndex((m) => m && String(m.driverId) === String(ac.id));
+      if (targetIdx < 0 && acNameNorm) {
+        targetIdx = arr.findIndex((m) => m && normalizeConnectionName(m.driverName) === acNameNorm);
+      }
+
+      if (targetIdx >= 0) {
+        const existing = arr[targetIdx];
+        if (existing) {
+          const nextName = acName || existing.driverName;
+          if (existing.driverId !== ac.id || existing.driverName !== nextName || existing.variant !== "primary") {
+            arr[targetIdx] = { ...existing, driverId: ac.id, driverName: nextName, variant: "primary" };
+            changed = true;
+          }
+        }
+      } else {
+        const emptyIdx = arr.findIndex((m) => !m);
+        if (emptyIdx >= 0) {
+          arr[emptyIdx] = {
+            driverId: ac.id,
+            driverName: acName || "Connected DB",
+            displayName: "Database Connection",
+            variant: "primary",
+          };
+          changed = true;
+        }
+      }
+
+      // Remove duplicates by connection name (case-insensitive), keeping first occurrence.
+      const seen = new Set<string>();
+      for (let i = 0; i < arr.length; i++) {
+        const m = arr[i];
+        if (!m) continue;
+        const key = normalizeConnectionName(m.driverName) || `id:${String(m.driverId)}`;
+        if (seen.has(key)) {
+          arr[i] = null;
+          changed = true;
+          continue;
+        }
+        seen.add(key);
+      }
+
+      return changed ? arr : prev;
+    });
+  }, [activeConnection]);
+
+  const openWizard = useCallback((slotIndex: number) => {
+    setActiveSlot(slotIndex);
+    setWizardOpen(true);
+  }, []);
+
+  const closeWizard = useCallback(() => {
+    setWizardOpen(false);
+    setActiveSlot(null);
+  }, []);
+
+  const handleConnected = useCallback((driverId: string, driverName: string, driverCategories: string[]) => {
+    if (activeSlot === null) return;
+    const variant = categoriesToVariant(driverCategories);
+    setModules((prev) => {
+      const next = [...prev];
+      next[activeSlot] = { driverId, driverName, displayName: "Database Connection", variant };
+      return next;
+    });
+  }, [activeSlot]);
+
+  const renameModule = useCallback((slotIndex: number, newName: string) => {
+    setModules((prev) => {
+      const next = [...prev];
+      if (next[slotIndex]) {
+        next[slotIndex] = { ...next[slotIndex]!, displayName: newName };
+      }
+      return next;
+    });
+  }, []);
+
+  const removeModule = useCallback((slotIndex: number) => {
+    setModules((prev) => {
+      const next = [...prev];
+      next[slotIndex] = null;
+      return next;
+    });
+  }, []);
+
+  // Count how many slots to show: filled slots + up to 2 empty slots (min 2 total)
+  const filledCount = modules.filter(Boolean).length;
+  const visibleCount = Math.max(2, Math.min(filledCount + 2, MAX_SLOTS));
+
   return (
-    <div className="relative min-h-screen bg-slate-950 overflow-hidden">
+    <div className="relative min-h-screen overflow-hidden">
       {/* Динамический градиент в стиле нефтяного пятна */}
       <div className="absolute inset-0 opacity-15">
         <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 animate-pulse" />
@@ -65,114 +207,103 @@ export default function HomeClient() {
       
       <div ref={containerRef} className="relative h-screen overflow-y-auto">
         <div className="px-8 py-8 space-y-8">
-          {/* Page Header */}
-          <div className="backdrop-blur-xl bg-white/10 rounded-3xl border border-white/20 shadow-2xl p-8">
-            <div className="flex items-center gap-4">
-              <div className="p-3 bg-gradient-to-br from-emerald-500/20 to-emerald-600/20 rounded-2xl border border-emerald-400/20">
-                <HomeIcon className="h-8 w-8 text-emerald-400" />
-              </div>
-              <div>
-                <h1 className="text-3xl font-bold text-white">Home</h1>
-                <p className="text-slate-300 mt-2">Подключи свою БД и начни работу прямо сейчас!</p>
+          
+          {/* My Projects Section */}
+          <MyProjects 
+            onOpenProject={(projectId) => {
+              router.push(`/dashboard?project=${projectId}`);
+            }}
+            onCreateProject={() => {
+              router.push('/dashboard');
+            }}
+            onProjectsCountChange={setProjectsCount}
+          />
+
+          {filledCount === 0 && projectsCount === 0 && (
+            <div className="rounded-3xl border border-white/15 bg-white/5 p-6">
+              <div className="text-lg font-semibold text-white">Get started in 3 steps</div>
+              <div className="mt-1 text-sm text-slate-400">Set up your first dashboard in under 2 minutes.</div>
+              <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <div className="text-xs uppercase tracking-wider text-slate-500">Step 1</div>
+                  <div className="mt-1 text-sm font-semibold text-white">Connect a database</div>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <div className="text-xs uppercase tracking-wider text-slate-500">Step 2</div>
+                  <div className="mt-1 text-sm font-semibold text-white">Open Dashboard</div>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <div className="text-xs uppercase tracking-wider text-slate-500">Step 3</div>
+                  <div className="mt-1 text-sm font-semibold text-white">Drag fields onto a chart</div>
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
-          {/* Database Connection Buttons - Large, side by side */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <DatabaseConnectionStatus
-              size="large"
-              variant="primary"
-              onClick={() => openConnectionModal("primary")}
-            />
-            <DatabaseConnectionStatus
-              size="large"
-              variant="schema"
-              onClick={() => openConnectionModal("schema")}
-            />
-          </div>
-
-          {/* Additional Database Connections */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <DatabaseConnectionStatus
-              size="large"
-              variant="vector"
-              onClick={() => openConnectionModal("vector")}
-            />
-            <DatabaseConnectionStatus
-              size="large"
-              variant="warehouse"
-              onClick={() => openConnectionModal("warehouse")}
-            />
-          </div>
-
-          {/* More Database Connections */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <DatabaseConnectionStatus
-              size="large"
-              variant="cloud"
-              onClick={() => openConnectionModal("cloud")}
-            />
-            <DatabaseConnectionStatus
-              size="large"
-              variant="streaming"
-              onClick={() => openConnectionModal("streaming")}
-            />
-          </div>
-
-          {/* Empty Placeholder Slots */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {[0, 1].map((slotIndex) => (
+          {/* Database Module Slots */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {modules.slice(0, visibleCount).map((mod, slotIndex) => (
               <div key={slotIndex} className="relative">
-                <button
-                  type="button"
-                  onClick={() => setAddMenuOpen(addMenuOpen === slotIndex ? null : slotIndex)}
-                  className="w-full h-48 rounded-2xl border-2 border-dashed border-slate-600/30 bg-slate-800/20 hover:bg-slate-800/40 hover:border-slate-500/40 transition-all duration-300 flex flex-col items-center justify-center gap-3 group"
-                >
-                  <div className="w-12 h-12 rounded-xl bg-slate-700/30 flex items-center justify-center group-hover:bg-slate-700/50 transition-all">
-                    <svg className="w-6 h-6 text-slate-500 group-hover:text-slate-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-                    </svg>
+                {mod ? (
+                  /* Connected module card */
+                  <div className="relative">
+                    <DatabaseConnectionStatus
+                      variant={mod.variant}
+                      size="large"
+                      displayName={mod.displayName}
+                      bottomLabel={mod.driverName}
+                      onRename={(newName) => renameModule(slotIndex, newName)}
+                      onClick={() => {
+                        setExplorerModule(mod);
+                        setExplorerOpen(true);
+                      }}
+                    />
+                    {/* Remove button */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); removeModule(slotIndex); }}
+                      className="absolute top-2 right-2 z-30 p-1.5 text-slate-400 hover:text-red-400 transition-all opacity-0 group-hover:opacity-100 hover:opacity-100"
+                      style={{ opacity: 1 }}
+                      title="Удалить модуль"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
                   </div>
-                  <span className="text-sm text-slate-500 group-hover:text-slate-400 transition-colors">Add Module</span>
-                </button>
-
-                {addMenuOpen === slotIndex && (
-                  <div
-                    ref={menuRef}
-                    className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 z-50 w-64 rounded-xl border border-white/10 bg-slate-900/95 backdrop-blur-xl shadow-2xl shadow-black/40 py-2 animate-in fade-in slide-in-from-bottom-2 duration-150"
+                ) : (
+                  /* Empty "Connect to Data" slot */
+                  <button
+                    type="button"
+                    onClick={() => openWizard(slotIndex)}
+                    className="w-full h-48 rounded-2xl border-2 border-dashed border-slate-600/30 bg-slate-800/20 hover:bg-slate-800/40 hover:border-slate-500/40 transition-all duration-300 flex flex-col items-center justify-center gap-3 group"
                   >
-                    <div className="px-3 py-2 border-b border-white/10">
-                      <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Select DB Type</span>
+                    <div className="w-12 h-12 rounded-xl bg-slate-700/30 flex items-center justify-center group-hover:bg-slate-700/50 transition-all">
+                      <svg className="w-6 h-6 text-slate-500 group-hover:text-slate-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                      </svg>
                     </div>
-                    {DB_TYPE_OPTIONS.map((opt) => {
-                      const Icon = opt.icon;
-                      return (
-                        <button
-                          key={opt.variant}
-                          type="button"
-                          onClick={() => openConnectionModal(opt.variant)}
-                          className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 transition-colors"
-                        >
-                          <Icon className={`w-4 h-4 ${opt.accent}`} />
-                          <span className="text-sm text-slate-300">{opt.label}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
+                    <span className="text-sm text-slate-500 group-hover:text-slate-400 transition-colors">Connect to Data</span>
+                  </button>
                 )}
               </div>
             ))}
           </div>
 
-          
           <div className="pb-10" />
         </div>
       </div>
+
       <DatabaseConnectionModal
-        isOpen={connectionModal.open}
-        variant={connectionModal.variant}
-        onClose={closeConnectionModal}
+        isOpen={wizardOpen}
+        onClose={closeWizard}
+        onConnected={handleConnected}
+      />
+
+      <DbExplorerModal
+        isOpen={explorerOpen}
+        onClose={() => { setExplorerOpen(false); setExplorerModule(null); }}
+        connectionId={activeConnection?.id ?? explorerModule?.driverId ?? ""}
+        connectionName={explorerModule?.displayName ?? explorerModule?.driverName}
+        connectionType={explorerModule?.driverId}
       />
     </div>
   );

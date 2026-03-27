@@ -46,6 +46,6 @@ sinks:
       user: "default"
       password: ""
     acknowledgements:
-      enabled: true
+      enabled: false
     healthcheck:
       enabled: true

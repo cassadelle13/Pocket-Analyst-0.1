@@ -48,6 +48,12 @@ export function ConnectionStateProvider({ children }: { children: ReactNode }) {
 
   const refreshConnectionState = useCallback(async () => {
     setIsLoading(true);
+    const ctrl = new AbortController();
+    const t = window.setTimeout(() => {
+      try {
+        ctrl.abort();
+      } catch {}
+    }, 2500);
     try {
       // Check localStorage first for fast initial load
       if (typeof window !== "undefined") {
@@ -63,7 +69,7 @@ export function ConnectionStateProvider({ children }: { children: ReactNode }) {
       }
 
       // Verify with server that connection is still valid
-      const res = await fetch("/api/connection/status", { cache: "no-store" });
+      const res = await fetch("/api/connection/status", { cache: "no-store", signal: ctrl.signal });
       if (res.ok) {
         const data = await res.json();
         if (data.connected && data.connection) {
@@ -87,6 +93,9 @@ export function ConnectionStateProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       console.warn("[ConnectionState] Failed to refresh connection state:", err);
     } finally {
+      try {
+        window.clearTimeout(t);
+      } catch {}
       setIsLoading(false);
     }
   }, []);

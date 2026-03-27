@@ -1,12 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo, useCallback, memo } from "react";
+import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
-import { Card, Title, Metric, Text } from "@tremor/react";
-import BaseChart from "../charts/BaseChart";
+import { Card, Title, Metric, Text, TableRow, TableHeaderCell, TableCell } from "@tremor/react";
+import EChartsBaseChart from "../charts/BaseChart";
+import { VirtualizedTable } from "../ui/VirtualizedTable";
 import { useGlobalFilters } from "../../store/globalFiltersContext";
+import { useBiFilters } from "../../store/biFiltersContext";
+import { useSearchParams } from "next/navigation";
 import { RealTimeMetrics } from "../charts/RealTimeMetrics";
 import { useTheme } from '@/context/ThemeContext';
+import { useRole } from "../../providers";
+import { toTimeSeries, toCategorical, toPieData, toEChartsXY, toKpiValue, toScatterPoints, toTreemapData, toHeatmapData, toHistogramBins, analyzeColumns } from "./dbDataAdapter";
+import { ColumnMappingPanel, type ColumnMapping, type ColumnMeta } from "./ColumnMappingPanel";
+import { buildDbChartOption, detectColType, injectTemplateVars, pickAxes, resolveVizType, type VizType as BuilderVizType } from "./dbChartBuilder";
+import { applyChartConfigToEChartsOption, extractCreativeContainerStyles } from "../../lib/applyChartConfig";
+import ChartGlowWrapper from "./ChartGlowWrapper";
+import { buildSemanticGlobalContext, buildSemanticRequestContext } from "../../lib/semantic/requestContext";
+import { buildAutoSemanticQueryPayload } from "../../lib/semantic/autoSemanticModel";
+import { buildExprContextForPipelineStep, canCompileAstToSql, extractDepsFromAst, getEditorDiagnostics, parseUiFormulaToAst, resolveTypedDeps, resolveUsedComputeClosure } from "../../lib/semantic/expressionEngine";
+import { getExprEngineRolloutMode } from "../../lib/semantic/exprRollout";
+import { SlicerVisual } from "./SlicerVisual";
+import { CohortAnalysisChart } from "./RetentionMatrix";
+import { DrillBreadcrumbControls } from "./DrillBreadcrumbControls";
+import { detectTableColumnType, formatCellValue } from "../../lib/formatters";
+import type { PivotResult } from "../../lib/semantic/retentionResult";
+import type { PivotWorkerResponse } from "../../workers/retention.worker";
+import { computePivotResultSync } from "../../lib/semantic/pivotClientCompute";
 
 // Динамические импорты оригинальных компонентов
 const UPlotTrendModule = dynamic(() => import("../analytics/UPlotTrendModule"), { ssr: false });
@@ -22,65 +43,21 @@ interface ChartPreviewProps {
   height?: number;
   chartId?: string;
   groupId?: string;
+  chartData?: any;
+  isEditMode?: boolean;
+  onCellEdit?: (colIdx: number, rowIdx: number, value: string) => void;
 }
 
-// Mock данные для графиков (точно как в оригинальных страницах)
-// Revenue & Users Trend - данные за последние 14 дней
-const mockTrendData = Array.from({ length: 14 }, (_, i) => {
-  const daysAgo = 13 - i;
-  const ts = Date.now() - daysAgo * 24 * 3600000;
-  return {
-    ts,
-    revenue: 45000 + Math.random() * 15000 + Math.sin(i * 0.5) * 8000,
-    users: 2500 + Math.random() * 800 + Math.sin(i * 0.4) * 400,
-    conversion: 2.5 + Math.random() * 1.5 + Math.sin(i * 0.3) * 0.5,
-  };
-});
-
-// Forecast данные на следующие 7 дней
-const mockForecastData = Array.from({ length: 7 }, (_, i) => {
-  const ts = Date.now() + (i + 1) * 24 * 3600000;
-  return {
-    ts,
-    revenue_forecast: 52000 + Math.random() * 8000 + i * 1000,
-    users_forecast: 2800 + Math.random() * 400 + i * 50,
-    conversion_forecast: 3.2 + Math.random() * 0.8,
-  };
-});
-
-// Activity data для других графиков
-const mockActivityData = [
-  { ts: Date.now() - 6 * 3600000, events: 120, users: 45 },
-  { ts: Date.now() - 5 * 3600000, events: 180, users: 67 },
-  { ts: Date.now() - 4 * 3600000, events: 150, users: 54 },
-  { ts: Date.now() - 3 * 3600000, events: 220, users: 89 },
-  { ts: Date.now() - 2 * 3600000, events: 190, users: 72 },
-  { ts: Date.now() - 1 * 3600000, events: 240, users: 95 },
-  { ts: Date.now(), events: 210, users: 81 },
-];
-
-const mockBarData = [
-  { category: "Direct", value: 456 },
-  { category: "Organic", value: 351 },
-  { category: "Social", value: 271 },
-  { category: "Referral", value: 191 },
-];
-
-const mockAreaData = [
-  { date: "Jan 30", value: 120 },
-  { date: "Jan 31", value: 180 },
-  { date: "Feb 1", value: 150 },
-  { date: "Feb 2", value: 220 },
-  { date: "Feb 3", value: 190 },
-  { date: "Feb 4", value: 240 },
-  { date: "Feb 5", value: 210 },
-];
-
-const mockDonutData = [
-  { name: "Desktop", value: 1230 },
-  { name: "Mobile", value: 751 },
-  { name: "Tablet", value: 453 },
-];
+function stableHash01(input: string): number {
+  const s = String(input ?? "");
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const u = h >>> 0;
+  return (u % 10_000) / 10_000;
+}
 
 const mockBarListData = [
   { name: "page_view", value: 3420 },
@@ -89,89 +66,1627 @@ const mockBarListData = [
   { name: "download", value: 445 },
 ];
 
-export function ChartPreview({ chartName, chartType, width = 560, height = 360, chartId, groupId }: ChartPreviewProps) {
-  const { addPropertyFilter, dateRange, propertyFilters } = useGlobalFilters();
+function uniqStrings(arr: unknown): string[] {
+  if (!Array.isArray(arr)) return [];
+  const res: string[] = [];
+  for (const v of arr) {
+    const s = String(v ?? "").trim();
+    if (!s) continue;
+    if (!res.includes(s)) res.push(s);
+  }
+  return res;
+}
+
+export const ChartPreview = memo(function ChartPreview({ chartName, chartType, width = 560, height = 360, chartId, groupId, chartData, isEditMode, onCellEdit }: ChartPreviewProps) {
+  const { propertyFilters, addPropertyFilter, removePropertyFilter, dateRange } = useGlobalFilters();
+  const { filters: biFilters, version: biFilterVersion, pageScopeMode } = useBiFilters();
   const { theme } = useTheme();
+  const { role } = useRole();
+  const searchParams = useSearchParams();
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+
+  const [semanticArtifacts, setSemanticArtifacts] = useState<any>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const next = detail?.semanticArtifacts;
+      if (!next || typeof next !== "object") return;
+      setSemanticArtifacts(next);
+    };
+    window.addEventListener("dashboard:semantic-artifacts", handler as EventListener);
+    return () => window.removeEventListener("dashboard:semantic-artifacts", handler as EventListener);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const tid = detail?.activeTabId ? String(detail.activeTabId) : null;
+      setActiveTabId(tid);
+    };
+    window.addEventListener("dashboard:active-chart-id", handler as EventListener);
+    return () => window.removeEventListener("dashboard:active-chart-id", handler as EventListener);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const tid = detail?.activeTabId ? String(detail.activeTabId) : null;
+      setActiveTabId(tid);
+    };
+    window.addEventListener("dashboard:active-tab-id", handler as EventListener);
+    return () => window.removeEventListener("dashboard:active-tab-id", handler as EventListener);
+  }, []);
+
+  const effectivePageKey = useMemo(() => {
+    return pageScopeMode === "tab" ? (activeTabId ? String(activeTabId) : "tab:unknown") : "dashboard";
+  }, [pageScopeMode, activeTabId]);
+  const drillCols = useMemo(() => {
+    const mapping = (chartData as any)?.columnMapping;
+    return Array.isArray(mapping?.drilldownColumns)
+      ? mapping.drilldownColumns.map((c: any) => String(c ?? "").trim()).filter(Boolean)
+      : [];
+  }, [chartData]);
+  const drillLevel = useMemo(() => {
+    const raw = Number((chartData as any)?.__drillLevel ?? -1);
+    return Number.isFinite(raw) ? raw : -1;
+  }, [chartData]);
+  const applyChartPatch = useCallback((patch: Record<string, unknown>) => {
+    if (!chartId) return;
+    try {
+      window.dispatchEvent(
+        new CustomEvent("dashboard:update-chart-data", {
+          detail: { chartId, patch },
+        })
+      );
+    } catch {}
+  }, [chartId]);
+  const handleDrillDown = useCallback(() => {
+    if (!chartData || typeof chartData !== "object") return;
+    if (drillCols.length === 0) return;
+    const next = drillLevel + 1;
+    if (next >= drillCols.length) return;
+    applyChartPatch({ __drillLevel: next });
+  }, [applyChartPatch, chartData, drillCols.length, drillLevel]);
+  const handleDrillUp = useCallback(() => {
+    if (!chartData || typeof chartData !== "object") return;
+    if (drillCols.length === 0) return;
+    const prev = drillLevel - 1;
+    applyChartPatch({ __drillLevel: prev });
+  }, [applyChartPatch, chartData, drillCols.length, drillLevel]);
   const [apiLineData, setApiLineData] = useState<Array<{ ts: number; v: number }> | null>(null);
   const [apiBarCatData, setApiBarCatData] = useState<Array<{ category: string; value: number }> | null>(null);
   const [tableSort, setTableSort] = useState<{ key: 'name' | 'value' | 'trend'; dir: 'asc' | 'desc' }>({ key: 'value', dir: 'desc' });
+  const [dbTableData, setDbTableData] = useState<{ columns: string[]; rows: unknown[][]; rowCount?: number } | null>(null);
+  const [dbTableLoading, setDbTableLoading] = useState(false);
+  const [dbTableError, setDbTableError] = useState<string | null>(null);
+  const [semanticTableSort, setSemanticTableSort] = useState<{ column: number; dir: "asc" | "desc" } | null>(null);
+
+  const exprEngineRolloutMode = useMemo(() => getExprEngineRolloutMode(), []);
+
+  const pivotConfig = useMemo(() => {
+    const p = (chartData as any)?.pivot;
+    if (!p || typeof p !== "object") return null;
+    const cohort = (p as any).cohort;
+    if (cohort && typeof cohort === "object" && (cohort as any).enabled === true) return cohort;
+    return null;
+  }, [chartData]);
+
+  const [pivotResult, setPivotResult] = useState<PivotResult | null>(null);
+  const [pivotError, setPivotError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (chartData?.kind !== "db-table") return;
+    const connectionId = String(chartData?.connectionId ?? "");
+    const tableKey = String(chartData?.tableKey ?? "");
+    if (!connectionId || !tableKey) return;
+
+    const explicitSemanticModelId = typeof (chartData as any)?.semanticModelId === "string" ? String((chartData as any).semanticModelId) : "";
+    const semanticModelId = String(explicitSemanticModelId || "").trim();
+    const logicalQuery = ((chartData as any)?.logicalQuery && typeof (chartData as any).logicalQuery === "object") ? (chartData as any).logicalQuery : null;
+
+    if (exprEngineRolloutMode === "on") {
+      try {
+        const semanticModelV1 = (semanticArtifacts as any)?.semanticModelV1 ?? null;
+        const sourceModel = String((logicalQuery as any)?.sourceModel ?? "").trim();
+        const pipelineSteps = Array.isArray((logicalQuery as any)?.pipeline?.steps) ? (logicalQuery as any).pipeline.steps : [];
+        const computeSteps = pipelineSteps.filter((s: any) => String(s?.kind ?? "") === "compute");
+
+        for (const s of computeSteps) {
+          const stepId = String(s?.id ?? "");
+          if (!stepId) continue;
+          const ui = String(s?.uiFormula ?? s?.formula ?? "");
+          if (!ui.trim()) continue;
+
+          const ctx = buildExprContextForPipelineStep({
+            semanticModelV1,
+            sourceModel,
+            dialect: "postgres",
+            mode: "legacy-calc-expr",
+            steps: pipelineSteps.map((x: any) => ({ id: String(x?.id ?? ""), kind: String(x?.kind ?? ""), outputId: String(x?.outputId ?? "") })),
+            stepId,
+          });
+
+          const errors = getEditorDiagnostics({ formula: ui, ctx });
+          if ((errors?.length ?? 0) > 0) {
+            // Stage A: diagnostics only (no behavior change)
+            // eslint-disable-next-line no-console
+            console.warn("[expr-engine] compute formula diagnostics", { stepId, errors });
+          }
+        }
+      } catch {
+        // Never break chart rendering due to diagnostics.
+      }
+    }
+
+    const analyzeComputeDepsWithEngine = (params: { stepId: string; uiFormula: string; availableComputeIds: Set<string>; computeId?: string }) => {
+      const semanticModelV1 = (semanticArtifacts as any)?.semanticModelV1 ?? null;
+      const sourceModel = String((logicalQuery as any)?.sourceModel ?? "").trim();
+      const pipelineSteps = Array.isArray((logicalQuery as any)?.pipeline?.steps) ? (logicalQuery as any).pipeline.steps : [];
+      const ctx = buildExprContextForPipelineStep({
+        semanticModelV1,
+        sourceModel,
+        dialect: "postgres",
+        mode: "legacy-calc-expr",
+        steps: pipelineSteps.map((x: any) => ({ id: String(x?.id ?? ""), kind: String(x?.kind ?? ""), outputId: String(x?.outputId ?? "") })),
+        stepId: params.stepId || String(params.computeId ?? ""),
+      });
+      const analysisErrors = getEditorDiagnostics({ formula: params.uiFormula, ctx });
+      const ast = parseUiFormulaToAst(params.uiFormula);
+      const deps = resolveTypedDeps({ deps: extractDepsFromAst(ast as any), availableComputeIds: params.availableComputeIds });
+      const isSql = canCompileAstToSql(ast as any, "postgres") && (analysisErrors?.length ?? 0) === 0;
+      return { deps, isSql };
+    };
+
+     const mapping = (chartData?.columnMapping ?? null) as ColumnMapping | null;
+     const drillLevelRaw = Number((chartData as any)?.__drillLevel ?? -1);
+     const drillLevel = Number.isFinite(drillLevelRaw) ? drillLevelRaw : -1;
+     const drillCols = Array.isArray((mapping as any)?.drilldownColumns) ? (mapping as any).drilldownColumns : [];
+     const drillCol = (drillLevel >= 0 && drillLevel < drillCols.length) ? String(drillCols[drillLevel] ?? "").trim() : "";
+
+     const effectiveMapping = (() => {
+       if (!mapping || !drillCol) return mapping;
+       const originalGroupBy = String((mapping as any)?.groupBy ?? "").trim();
+       const details2Columns = Array.isArray((mapping as any)?.details2Columns) ? (mapping as any).details2Columns : [];
+       return {
+         ...(mapping as any),
+         groupBy: drillCol,
+         details2Columns: [
+           ...details2Columns,
+           ...(originalGroupBy ? [originalGroupBy] : []),
+         ],
+       } as any;
+     })();
+     const cfgVizType = String((chartData as any)?.chartConfig?.general?.vizType ?? "").trim().toLowerCase();
+    const legacyForcedViz = String((chartData as any)?.__forceVizType ?? "").trim().toLowerCase();
+    const forcedViz = cfgVizType || legacyForcedViz;
+    const customSql = String((chartData as any)?.customSql ?? "").trim();
+    const vizType = (forcedViz === "line" || forcedViz === "bar" || forcedViz === "table" || forcedViz === "pivot" || forcedViz === "area" || forcedViz === "pie" || forcedViz === "donut" || forcedViz === "scatter" || forcedViz === "treemap" || forcedViz === "histogram" || forcedViz === "kpi")
+     ? (forcedViz as any)
+     : resolveVizType(chartName);
+    const hasColumnsMeta = Array.isArray((chartData as any)?.columnsMeta) && ((chartData as any).columnsMeta.length ?? 0) > 0;
+    const showMapping = (chartData as any)?.__showColumnMapping === true || (vizType !== "table" && !mapping);
+    const getValidationError = (v: string, m: any): string | null => {
+      const viz = String(v ?? "").trim().toLowerCase();
+      if (customSql) return null;
+      if (viz === "kpi") return null;
+
+      const mm = (m && typeof m === "object") ? m : null;
+      if (!mm) return "Configure chart fields in the Visualizations pane.";
+
+      if (viz === "table") {
+        const details = Array.isArray((mm as any)?.detailsColumns) ? (mm as any).detailsColumns : [];
+        const ok = details.some((c: any) => !!String(c ?? "").trim());
+        return ok ? null : "Table requires at least one column in Columns.";
+      }
+
+      if (viz === "pie") {
+        const cat = String((mm as any)?.groupBy ?? "").trim();
+        const y0 = String((Array.isArray((mm as any)?.yColumns) ? (mm as any).yColumns : [])?.[0]?.col ?? "").trim();
+        if (!cat) return "Pie requires Category.";
+        if (!y0) return "Pie requires a measure in Values.";
+        return null;
+      }
+
+      if (viz === "pivot") {
+        const row = String((mm as any)?.detailsColumns?.[0] ?? "").trim();
+        const col = String((mm as any)?.details2Columns?.[0] ?? "").trim();
+        const val = String((Array.isArray((mm as any)?.yColumns) ? (mm as any).yColumns : [])?.[0]?.col ?? "").trim();
+        if (!row) return "Pivot requires Rows field.";
+        if (!col) return "Pivot requires Columns field.";
+        if (!val) return "Pivot requires a measure in Values.";
+        return null;
+      }
+
+      const x = String((mm as any)?.xColumn ?? "").trim();
+      const yArr = Array.isArray((mm as any)?.yColumns) ? (mm as any).yColumns : [];
+      const y2Arr = Array.isArray((mm as any)?.y2Columns) ? (mm as any).y2Columns : [];
+      const yOk = yArr.some((yy: any) => !!String(yy?.col ?? "").trim()) || y2Arr.some((yy: any) => !!String(yy?.col ?? "").trim());
+      if (!x) return "Chart requires Axis (X).";
+      if (!yOk) return "Chart requires at least one measure in Axis (Y).";
+      return null;
+    };
+
+    const validationErr = getValidationError(String(vizType ?? ""), effectiveMapping);
+    if (validationErr && (hasColumnsMeta || effectiveMapping)) {
+      setDbTableData(null);
+      setDbTableLoading(false);
+      setDbTableError(validationErr);
+      return;
+    }
+
+    let aborted = false;
+
+    const scopedDirectBiFilters = (() => {
+      const arr = Array.isArray(biFilters) ? biFilters : [];
+      return arr.filter((f: any) => {
+        const scope = (f?.scope === "report" || f?.scope === "page" || f?.scope === "visual") ? f.scope : "visual";
+        if (scope === "report") return true;
+        if (scope === "page") {
+          const fk = String(f?.pageKey ?? "").trim();
+          return !!effectivePageKey && fk === effectivePageKey;
+        }
+        const src = String(f?.sourceChartId ?? "").trim();
+        return !!chartId && src === String(chartId);
+      });
+    })();
+
+    const load = async () => {
+      setDbTableLoading(true);
+      setDbTableError(null);
+      try {
+        if (customSql) {
+          if (!connectionId) {
+            throw new Error("Direct SQL requires connectionId.");
+          }
+          const injectedSql = injectTemplateVars(customSql, {
+            start: dateRange?.start,
+            end: dateRange?.end,
+          });
+          const sqlRes = await fetch("/api/query", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              connectionId,
+              sql: injectedSql,
+              role: (() => {
+                if (role === "data-admin") return "admin";
+                if (role === "business") return "business";
+                return "user";
+              })(),
+              maxRows: 5000,
+            }),
+            cache: "no-store",
+          });
+          const sqlJson = await sqlRes.json().catch(() => ({}));
+          if (!sqlRes.ok) {
+            throw new Error(String(sqlJson?.error ?? "SQL query failed"));
+          }
+
+          const sqlPayload = sqlJson?.data ?? sqlJson;
+          const sqlColumns = Array.isArray(sqlPayload?.columns)
+            ? sqlPayload.columns.map((c: any) => String(c))
+            : [];
+          const sqlRows = Array.isArray(sqlPayload?.rows) ? sqlPayload.rows : [];
+
+          const ordered = (() => {
+            if (String(vizType ?? "").toLowerCase() !== "table") {
+              return { columns: sqlColumns, rows: sqlRows };
+            }
+            const detailsCols = Array.isArray((effectiveMapping as any)?.detailsColumns)
+              ? (effectiveMapping as any).detailsColumns.map((c: any) => String(c ?? "").trim()).filter(Boolean)
+              : [];
+            if (detailsCols.length === 0 || sqlColumns.length === 0) {
+              return { columns: sqlColumns, rows: sqlRows };
+            }
+
+            const indexByCol = new Map<string, number>();
+            for (let i = 0; i < sqlColumns.length; i += 1) {
+              indexByCol.set(String(sqlColumns[i] ?? ""), i);
+            }
+            const orderedCols = detailsCols.filter((c: string) => indexByCol.has(c));
+            if (orderedCols.length === 0) {
+              return { columns: sqlColumns, rows: sqlRows };
+            }
+
+            const orderedRows = sqlRows.map((row: any) => {
+              const arr = Array.isArray(row) ? row : [];
+              return orderedCols.map((col: string) => arr[indexByCol.get(col) ?? -1]);
+            });
+            return { columns: orderedCols, rows: orderedRows };
+          })();
+
+          if (!aborted) {
+            setDbTableData({ columns: ordered.columns, rows: ordered.rows });
+          }
+          return;
+        }
+
+        const useSemantic = !!semanticModelId
+          && !!logicalQuery
+          && !!String((logicalQuery as any)?.sourceModel ?? "").trim();
+
+        const rawRetentionMode = Boolean((pivotConfig as any)?.rawMode);
+        const rawRetentionConnectionId = String((pivotConfig as any)?.rawConnectionId ?? connectionId).trim();
+        const rawRetentionTableKey = String((pivotConfig as any)?.rawTableKey ?? tableKey).trim();
+
+        if (useSemantic && effectiveMapping) {
+          // Single source of truth: Visualizations panel owns logicalQuery in semantic mode.
+          // ChartPreview should consume logicalQuery, not rebuild and overwrite it.
+        }
+        let semanticModelForRequest: any = null;
+        let semanticModelIdForRequest = semanticModelId;
+        let logicalQueryForRequest: any = logicalQuery;
+        let sourceBindingsForRequest: Record<string, { connectionId: string; tableKey: string; connectionType?: string }> | undefined;
+
+        if (!useSemantic) {
+          if (!connectionId || !tableKey) {
+            throw new Error("This visual requires connectionId and tableKey.");
+          }
+          if (!effectiveMapping) {
+            throw new Error("This visual requires a column mapping.");
+          }
+
+          const auto = buildAutoSemanticQueryPayload({
+            tableKey: rawRetentionMode && rawRetentionTableKey ? rawRetentionTableKey : tableKey,
+            connectionId: rawRetentionMode && rawRetentionConnectionId ? rawRetentionConnectionId : connectionId,
+            connectionType: String(chartData?.connectionType ?? ""),
+            columnsMeta: Array.isArray((chartData as any)?.columnsMeta) ? (chartData as any).columnsMeta : [],
+            mapping: {
+              ...(effectiveMapping as any),
+              filters: scopedDirectBiFilters.map((f: any) => ({
+                field: String(f?.field ?? ""),
+                operator: String(f?.op ?? "eq"),
+                values: Array.isArray(f?.values) ? f.values : [],
+              })),
+            },
+            vizType,
+            pivotConfig,
+            prevLogicalQuery: logicalQuery,
+          });
+
+          semanticModelForRequest = auto.semanticModel;
+          logicalQueryForRequest = auto.logicalQuery;
+          sourceBindingsForRequest = auto.sourceBindings;
+          semanticModelIdForRequest = "";
+        }
+
+        const dbgGlobalContextBase = buildSemanticGlobalContext(biFilters, {
+          dateRange: {
+            start: dateRange?.start,
+            end: dateRange?.end,
+          },
+        });
+        const dbgParams = (() => {
+          const a = (semanticArtifacts && typeof semanticArtifacts === "object") ? semanticArtifacts : null;
+          const selections = a && a.parameterSelections && typeof a.parameterSelections === "object" ? a.parameterSelections : null;
+          if (!selections) return undefined;
+          const out: Record<string, any> = {};
+          for (const k of Object.keys(selections)) {
+            const sel = (selections as any)[k];
+            const values = Array.isArray(sel?.values) ? sel.values : [];
+            const single = values.length === 1 ? values[0] : null;
+            out[String(k).toLowerCase()] = single;
+          }
+          out.viewerRole = role;
+          try {
+            const uid = window.localStorage.getItem("dashboard:user:id");
+            if (uid) out.viewerId = uid;
+          } catch {}
+          return out;
+        })();
+        const derivedMetrics = (() => {
+          const cd = (chartData && typeof chartData === "object") ? (chartData as any) : null;
+          const pipeline = cd?.pipeline && typeof cd.pipeline === "object" ? cd.pipeline : null;
+          const steps = pipeline && Number(pipeline.version) === 1 && Array.isArray(pipeline.steps) ? pipeline.steps : [];
+          const fromPipeline = steps
+            .filter((s: any) => s && typeof s === "object" && s.kind === "compute")
+            .map((s: any) => ({
+              id: String(s.outputId ?? "").trim(),
+              formula: String(s.formula ?? "").trim(),
+              uiFormula: String(s.uiFormula ?? "").trim(),
+              meta: s.meta,
+            }))
+            .filter((m: any) => !!m.id);
+          if (fromPipeline.length) return fromPipeline;
+
+          const arr = (cd && Array.isArray(cd.derivedMetrics)) ? cd.derivedMetrics : [];
+          return arr.filter((m: any) => m && typeof m === "object");
+        })();
+        const ephemeralCalculatedMeasures = (() => {
+          if (!logicalQuery || typeof logicalQuery !== "object") return null;
+
+          const computeById: Record<string, any> = {};
+          for (const m of derivedMetrics) {
+            const id = String((m as any)?.id ?? "").trim();
+            if (!id) continue;
+            computeById[id] = m;
+          }
+
+          const extractMetricId = (ref: string): string => {
+            const s = String(ref ?? "").trim();
+            if (!s) return "";
+            const parts = s.split(".");
+            return String(parts[parts.length - 1] ?? "").trim();
+          };
+
+          const measures = Array.isArray((logicalQuery as any)?.measures) ? (logicalQuery as any).measures : [];
+
+          const pipelineSteps = (() => {
+            const cd = (chartData && typeof chartData === "object") ? (chartData as any) : null;
+            const pipeline = cd?.pipeline && typeof cd.pipeline === "object" ? cd.pipeline : null;
+            const steps = pipeline && Number(pipeline.version) === 1 && Array.isArray(pipeline.steps) ? pipeline.steps : [];
+            return steps;
+          })();
+
+          const computeStepIdByOutputId = (() => {
+            const map: Record<string, string> = {};
+            for (const s of pipelineSteps) {
+              if (!s || typeof s !== "object") continue;
+              if (String((s as any).kind ?? "") !== "compute") continue;
+              const outputId = String((s as any).outputId ?? "").trim();
+              const stepId = String((s as any).id ?? "").trim();
+              if (!outputId || !stepId) continue;
+              map[outputId] = stepId;
+            }
+            return map;
+          })();
+
+          const rootIds: string[] = Array.from(new Set(measures
+            .map((r: any) => extractMetricId(r))
+            .filter((id: string) => !!id && Object.prototype.hasOwnProperty.call(computeById, id))
+          ));
+
+          // Build deps for closure resolution (A -> B -> C).
+          const availableComputeIds = new Set(Object.keys(computeById));
+          const depsById: Record<string, any[]> = {};
+          for (const id of Object.keys(computeById)) {
+            const dm = computeById[id];
+            const ui = String((dm as any)?.uiFormula ?? (dm as any)?.formula ?? "");
+            if (exprEngineRolloutMode === "on") {
+              try {
+                const stepId = String(computeStepIdByOutputId[id] ?? "");
+                const res = analyzeComputeDepsWithEngine({ stepId, computeId: id, uiFormula: ui, availableComputeIds });
+                depsById[id] = res.deps;
+              } catch {
+                depsById[id] = [];
+              }
+            } else {
+              try {
+                const ast = parseUiFormulaToAst(ui);
+                const deps0 = extractDepsFromAst(ast);
+                const deps = resolveTypedDeps({ deps: deps0, availableComputeIds });
+                depsById[id] = deps;
+              } catch {
+                depsById[id] = [];
+              }
+            }
+          }
+
+          const closureIds = resolveUsedComputeClosure({
+            rootIds,
+            computeById: Object.fromEntries(Object.entries(computeById).map(([k]) => [k, { meta: { deps: depsById[k] } }])) as any,
+          });
+
+          const sqlComputes = closureIds.filter((id: string) => {
+            const dm = computeById[id];
+            if (!dm) return false;
+            const sql = String((dm as any)?.formula ?? "").trim();
+            if (!sql) return false;
+            if (exprEngineRolloutMode === "on") {
+              try {
+                const uiFormula = String((dm as any)?.uiFormula ?? sql);
+                const stepId = String(computeStepIdByOutputId[id] ?? "");
+                const res = analyzeComputeDepsWithEngine({ stepId, computeId: id, uiFormula, availableComputeIds });
+                return res.isSql;
+              } catch {
+                return false;
+              }
+            } else {
+              try {
+                const ast = parseUiFormulaToAst(String((dm as any)?.uiFormula ?? sql));
+                return canCompileAstToSql(ast, "postgres");
+              } catch {
+                // If we cannot parse it, treat it as non-sql so that it doesn't poison injection.
+                return false;
+              }
+            }
+          });
+
+          if (process.env.NODE_ENV !== "production") {
+            try {
+              // eslint-disable-next-line no-console
+              console.debug("[computed-injection]", {
+                rootIds,
+                closureIds,
+                sqlComputes,
+                missingSql: closureIds.filter((id: string) => !sqlComputes.includes(id)),
+              });
+            } catch {}
+          }
+
+          const out: Record<string, { sql: string }> = {};
+          for (const id of sqlComputes) {
+            const dm = computeById[id];
+            const sql = String((dm as any)?.formula ?? "").trim();
+            if (!sql) continue;
+            out[id] = { sql };
+          }
+
+          const userCalcRaw = (chartData as any)?.userCalculatedMeasures;
+          const userEntries = Array.isArray(userCalcRaw)
+            ? userCalcRaw
+            : (userCalcRaw && typeof userCalcRaw === "object" ? Object.entries(userCalcRaw).map(([id, v]) => ({ id, ...(v as any) })) : []);
+          for (const uc of userEntries as any[]) {
+            const id = String((uc as any)?.id ?? "").trim();
+            const sql = String((uc as any)?.sql ?? "").trim();
+            if (!id || !sql) continue;
+            out[id] = { sql };
+          }
+
+          return Object.keys(out).length ? out : null;
+        })();
+
+        const dbgGlobalContext = {
+          ...(dbgGlobalContextBase as any),
+          params: dbgParams,
+        };
+        const dbgRequestContext = buildSemanticRequestContext({
+          chartId,
+          pageKey: effectivePageKey,
+        });
+        if (process.env.NODE_ENV !== "production") {
+          try {
+            // eslint-disable-next-line no-console
+            console.log("[semantic/query]", {
+              chartId,
+              pageKey: effectivePageKey,
+              filters: Array.isArray((dbgGlobalContext as any)?.filters) ? (dbgGlobalContext as any).filters.length : 0,
+              report: (Array.isArray((dbgGlobalContext as any)?.filters) ? (dbgGlobalContext as any).filters : []).filter((f: any) => (f?.scope ?? "visual") === "report").length,
+              page: (Array.isArray((dbgGlobalContext as any)?.filters) ? (dbgGlobalContext as any).filters : []).filter((f: any) => (f?.scope ?? "visual") === "page").length,
+              visual: (Array.isArray((dbgGlobalContext as any)?.filters) ? (dbgGlobalContext as any).filters : []).filter((f: any) => (f?.scope ?? "visual") === "visual").length,
+              requestContext: dbgRequestContext,
+              semanticModelId,
+            });
+          } catch {}
+        }
+
+        const res = await fetch("/api/semantic/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            {
+              projectId: (() => {
+                const urlPid = searchParams.get("project");
+                if (urlPid) return urlPid;
+                try {
+                  return window.localStorage.getItem("dashboard:semantic:projectId") || "";
+                } catch {
+                  return "";
+                }
+              })(),
+              query: {
+                ...(logicalQueryForRequest as any),
+                vizType,
+              },
+              ...(semanticModelForRequest ? { semanticModel: semanticModelForRequest } : {}),
+              ...(sourceBindingsForRequest ? { sourceBindings: sourceBindingsForRequest } : {}),
+              ...(semanticModelIdForRequest ? { semanticModelId: semanticModelIdForRequest } : {}),
+              ...(ephemeralCalculatedMeasures ? { ephemeralCalculatedMeasures } : {}),
+              globalContext: dbgGlobalContext,
+              requestContext: dbgRequestContext,
+              role: (() => {
+                if (role === "data-admin") return "admin";
+                if (role === "business") return "business";
+                return "user";
+              })(),
+              maxRows: 500,
+              page: Number((chartData as any)?.pagination?.page ?? 1) || 1,
+              pageSize: Number((chartData as any)?.pagination?.pageSize ?? (logicalQueryForRequest as any)?.limit ?? 500) || 500,
+            },
+            null,
+            2
+          ),
+          cache: "no-store",
+        });
+
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(json?.error ?? "Failed to load table");
+        }
+
+        const payload = (json?.data && typeof json.data === "object" && (json.data as any)?.data && typeof (json.data as any).data === "object")
+          ? (json.data as any).data
+          : (json?.data ?? {});
+        const columns = Array.isArray(payload?.columns) ? payload.columns.map((c: any) => String(c)) : [];
+        const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+        const rowCount = typeof payload?.rowCount === "number" ? payload.rowCount : undefined;
+
+        if (!aborted) {
+          setDbTableData({ columns, rows, rowCount });
+        }
+      } catch (e: any) {
+        if (!aborted) {
+          setDbTableData(null);
+          setDbTableError(e instanceof Error ? e.message : "Failed to load table");
+        }
+      } finally {
+        if (!aborted) setDbTableLoading(false);
+      }
+    };
+
+    load();
+
+    return () => {
+      aborted = true;
+    };
+  }, [
+    chartName,
+    role,
+    chartId,
+    effectivePageKey,
+    biFilterVersion,
+    pivotConfig,
+    String(chartData?.kind ?? ""),
+    String(chartData?.connectionId ?? ""),
+    String(chartData?.tableKey ?? ""),
+    String(chartData?.connectionType ?? ""),
+    String((chartData as any)?.customSql ?? ""),
+    String((chartData as any)?.__sqlRunNonce ?? ""),
+    String((chartData as any)?.semanticModelId ?? ""),
+    JSON.stringify((chartData as any)?.logicalQuery ?? null),
+    JSON.stringify((chartData as any)?.columnMapping ?? null),
+    JSON.stringify((chartData as any)?.pipeline ?? null),
+    String(dateRange?.start instanceof Date ? dateRange.start.toISOString() : dateRange?.start ?? ""),
+    String(dateRange?.end instanceof Date ? dateRange.end.toISOString() : dateRange?.end ?? ""),
+    semanticArtifacts,
+  ]);
+
+  useEffect(() => {
+    if (!pivotConfig) {
+      setPivotResult(null);
+      setPivotError(null);
+      return;
+    }
+    if (!dbTableData || !Array.isArray(dbTableData.columns) || !Array.isArray(dbTableData.rows)) {
+      setPivotResult(null);
+      return;
+    }
+
+    let cancelled = false;
+    const taskId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const worker = new Worker(new URL("../../workers/retention.worker.ts", import.meta.url), { type: "module" });
+
+    const cohortField = String((pivotConfig as any)?.cohortField ?? "").trim();
+    const activityField = String((pivotConfig as any)?.activityField ?? "").trim();
+    const userField = String((pivotConfig as any)?.userField ?? "").trim();
+    const usersField = String((pivotConfig as any)?.usersField ?? "").trim();
+    const unit = String((pivotConfig as any)?.unit ?? (pivotConfig as any)?.period ?? "day").trim() || "day";
+
+    const periodsRaw = (pivotConfig as any)?.periods;
+    const requestedPeriods: number[] = Array.isArray(periodsRaw) && periodsRaw.length > 0
+      ? periodsRaw.map((p: any) => Number(p)).filter((n: any) => Number.isFinite(n) && n >= 0)
+      : [];
+    const maxRowsCfg = Number((pivotConfig as any)?.maxRows ?? 50_000);
+    const maxRows = Number.isFinite(maxRowsCfg)
+      ? Math.max(1, Math.min(200_000, Math.trunc(maxRowsCfg)))
+      : 50_000;
+
+    const runSyncFallback = (reason: string) => {
+      try {
+        const payload = computePivotResultSync({
+          rows: dbTableData.rows,
+          columns: dbTableData.columns,
+          cohortField,
+          activityField,
+          ...(userField ? { userField } : {}),
+          ...(usersField ? { usersField } : {}),
+          unit: (String(unit).toLowerCase() as any) || "day",
+          ...(requestedPeriods.length ? { requestedPeriods } : {}),
+          maxRows,
+        });
+        setPivotError(`[fallback] Worker failed: ${reason}. Computed on main thread.`);
+        setPivotResult(payload as any);
+      } catch (e: any) {
+        setPivotResult(null);
+        setPivotError(String(e?.message ?? reason ?? "Failed to compute pivot"));
+      }
+    };
+
+    if (!cohortField || !activityField) {
+      setPivotResult(null);
+      setPivotError("Cohort Pivot is enabled but required fields are missing");
+      worker.terminate();
+      return;
+    }
+
+    if (!userField && !usersField) {
+      setPivotResult(null);
+      setPivotError("Cohort Pivot requires a User ID field or a Users count field");
+      worker.terminate();
+      return;
+    }
+
+    const onMsg = (e: MessageEvent<PivotWorkerResponse>) => {
+      const msg = e.data as any;
+      if (!msg || msg.taskId !== taskId) return;
+      if (cancelled) return;
+
+      if (msg.type === "PIVOT_ERROR" || msg.type === "RETENTION_ERROR") {
+        runSyncFallback(String(msg.error ?? "Failed to compute pivot"));
+        return;
+      }
+      if (msg.type === "PIVOT_RESULT" || msg.type === "RETENTION_RESULT") {
+        setPivotError(null);
+        setPivotResult(msg.payload as any);
+      }
+    };
+    const onWorkerError = (e: ErrorEvent) => {
+      if (cancelled) return;
+      runSyncFallback(String(e?.message ?? "Worker runtime error"));
+    };
+    const onWorkerMessageError = () => {
+      if (cancelled) return;
+      runSyncFallback("Worker message deserialization error");
+    };
+    worker.addEventListener("message", onMsg as any);
+    worker.addEventListener("error", onWorkerError as any);
+    worker.addEventListener("messageerror", onWorkerMessageError as any);
+
+    worker.postMessage({
+      type: "COMPUTE_PIVOT",
+      taskId,
+      payload: {
+        rows: dbTableData.rows,
+        columns: dbTableData.columns,
+        cohortField,
+        activityField,
+        ...(userField ? { userField } : {}),
+        ...(usersField ? { usersField } : {}),
+        unit,
+        ...(requestedPeriods.length ? { requestedPeriods } : {}),
+        maxRows,
+      },
+    });
+
+    return () => {
+      cancelled = true;
+      try { worker.removeEventListener("message", onMsg as any); } catch {}
+      try { worker.removeEventListener("error", onWorkerError as any); } catch {}
+      try { worker.removeEventListener("messageerror", onWorkerMessageError as any); } catch {}
+      try { worker.terminate(); } catch {}
+    };
+  }, [pivotConfig, dbTableData]);
 
   // Fetch for Line (time series)
   useEffect(() => {
     if (!chartName.includes("Line (time series)")) return;
-    try {
-      const sp = new URLSearchParams({
-        startDate: dateRange.start.toISOString(),
-        endDate: dateRange.end.toISOString(),
-      });
-      for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
-      fetch(`/api/rest/analytics-trend?${sp.toString()}`, { cache: "no-store" })
-        .then((r) => r.json())
-        .then((rows: any[]) => {
-          if (!Array.isArray(rows) || rows.length === 0) return;
-          setApiLineData(
-            rows.map((r) => ({ ts: Number(r.ts ?? 0), v: Number(r.events ?? 0) }))
-          );
-        })
-        .catch(() => {});
-    } catch {}
-  }, [chartName, dateRange.start, dateRange.end, propertyFilters]);
+    if (chartData?.kind === "db-table") return;
+    const filterKey = (() => {
+      try {
+        const stable = [...propertyFilters]
+          .map((f) => ({ k: String(f.key), o: String(f.operator), v: String(f.value) }))
+          .sort((a, b) => (a.k + a.o + a.v).localeCompare(b.k + b.o + b.v));
+        return JSON.stringify(stable);
+      } catch {
+        return "";
+      }
+    })();
+
+    const queryKey = `${dateRange?.start?.toISOString?.() ?? "all"}|${dateRange?.end?.toISOString?.() ?? "all"}|${filterKey}`;
+    const ctrl = new AbortController();
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const sp = new URLSearchParams();
+        if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
+        if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
+        for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+        const r = await fetch(`/api/rest/analytics-trend?${sp.toString()}`, { cache: "no-store", signal: ctrl.signal });
+        const rows = await r.json().catch(() => null);
+        if (cancelled) return;
+        if (!Array.isArray(rows) || rows.length === 0) return;
+        setApiLineData(rows.map((rr: any) => ({ ts: Number(rr.ts ?? 0), v: Number(rr.events ?? 0) })));
+      } catch (e: any) {
+        if (e?.name === 'AbortError') return;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      void queryKey;
+    };
+  }, [chartName, chartData?.kind, dateRange?.start, dateRange?.end, propertyFilters]);
 
   // Fetch for Bar (categorical)
   useEffect(() => {
     if (!chartName.includes("Bar (categorical)")) return;
-    try {
-      const sp = new URLSearchParams({
-        startDate: dateRange.start.toISOString(),
-        endDate: dateRange.end.toISOString(),
-      });
-      for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
-      fetch(`/api/rest/analytics-traffic?${sp.toString()}`, { cache: "no-store" })
-        .then((r) => r.json())
-        .then((rows: any[]) => {
-          if (!Array.isArray(rows) || rows.length === 0) return;
-          setApiBarCatData(
-            rows.map((r) => ({ category: String(r.category ?? ""), value: Number(r.value ?? 0) }))
-          );
-        })
-        .catch(() => {});
-    } catch {}
-  }, [chartName, dateRange.start, dateRange.end, propertyFilters]);
-  // Generic: Line (time series)
-  if (chartName.includes("Line (time series)")) {
-    const data = apiLineData ?? Array.from({ length: 24 }, (_, i) => ({ ts: Date.now() - (23 - i) * 3600_000, v: 100 + Math.sin(i / 3) * 20 + Math.random() * 10 }));
+    if (chartData?.kind === "db-table") return;
+    const filterKey = (() => {
+      try {
+        const stable = [...propertyFilters]
+          .map((f) => ({ k: String(f.key), o: String(f.operator), v: String(f.value) }))
+          .sort((a, b) => (a.k + a.o + a.v).localeCompare(b.k + b.o + b.v));
+        return JSON.stringify(stable);
+      } catch {
+        return "";
+      }
+    })();
+
+    const queryKey = `${dateRange?.start?.toISOString?.() ?? "all"}|${dateRange?.end?.toISOString?.() ?? "all"}|${filterKey}`;
+    const ctrl = new AbortController();
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const sp = new URLSearchParams();
+        if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
+        if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
+        for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+        const r = await fetch(`/api/rest/analytics-traffic?${sp.toString()}`, { cache: "no-store", signal: ctrl.signal });
+        const rows = await r.json().catch(() => null);
+        if (cancelled) return;
+        if (!Array.isArray(rows) || rows.length === 0) return;
+        setApiBarCatData(rows.map((rr: any) => ({ category: String(rr.category ?? ""), value: Number(rr.value ?? 0) })));
+      } catch (e: any) {
+        if (e?.name === 'AbortError') return;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      void queryKey;
+    };
+  }, [chartName, dateRange?.start, dateRange?.end, propertyFilters]);
+
+  // === DB data shortcuts (used by individual chart blocks below) ===
+  const hasDbData = chartData?.kind === "db-table" && dbTableData && !dbTableLoading && !dbTableError && (dbTableData.columns?.length ?? 0) > 0;
+  const dbCols: string[] = dbTableData?.columns ?? [];
+
+  // Apply cell overrides from edit mode (if any)
+  const cellOverrides: Record<string, string> | null = chartData?.__cellOverrides ?? null;
+  const dbRows: unknown[][] = useMemo(() => {
+    const raw: unknown[][] = dbTableData?.rows ?? [];
+    if (!cellOverrides || Object.keys(cellOverrides).length === 0) return raw;
+    return raw.map((row, rIdx) => {
+      const newRow = [...(row as any[])];
+      for (const [key, val] of Object.entries(cellOverrides)) {
+        const [r, c] = key.split(':').map(Number);
+        if (r === rIdx && c >= 0 && c < newRow.length) {
+          // Try to preserve numeric type
+          const num = Number(val);
+          newRow[c] = isNaN(num) || val === '' ? val : num;
+        }
+      }
+      return newRow;
+    });
+  }, [dbTableData?.rows, cellOverrides]);
+
+  const dbColTypes = useMemo(() => {
+    return dbCols.map((col, idx) => detectTableColumnType(dbRows, idx, col));
+  }, [dbCols, dbRows]);
+
+  const semanticTableRows = useMemo(() => {
+    if (!semanticTableSort) return dbRows;
+    const { column, dir } = semanticTableSort;
+    const sign = dir === "asc" ? 1 : -1;
+    return [...dbRows].sort((a, b) => {
+      const av = (a as any[])?.[column];
+      const bv = (b as any[])?.[column];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+
+      const an = Number(av);
+      const bn = Number(bv);
+      if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * sign;
+
+      const as = String(av).toLowerCase();
+      const bs = String(bv).toLowerCase();
+      if (as < bs) return -1 * sign;
+      if (as > bs) return 1 * sign;
+      return 0;
+    });
+  }, [dbRows, semanticTableSort]);
+
+  useEffect(() => {
+    setSemanticTableSort(null);
+  }, [dbTableData?.columns, chartId]);
+
+  const vizType = resolveVizType(chartName);
+  const mapping = (chartData?.columnMapping ?? null) as ColumnMapping | null;
+  const cfgVizType = String((chartData as any)?.chartConfig?.general?.vizType ?? "").trim().toLowerCase();
+  const legacyForcedViz = String((chartData as any)?.__forceVizType ?? "").trim().toLowerCase();
+  const forcedViz = cfgVizType || legacyForcedViz;
+  const customSql = String((chartData as any)?.customSql ?? "").trim();
+  const effectiveVizType = (forcedViz === "line" || forcedViz === "bar" || forcedViz === "table" || forcedViz === "pivot" || forcedViz === "area" || forcedViz === "pie" || forcedViz === "donut" || forcedViz === "scatter" || forcedViz === "treemap" || forcedViz === "histogram" || forcedViz === "kpi")
+    ? (forcedViz as any)
+    : vizType;
+  const columnsMeta: ColumnMeta[] = Array.isArray((chartData as any)?.columnsMeta) ? (chartData as any).columnsMeta : [];
+  const mappingColumns: ColumnMeta[] = columnsMeta.length > 0 ? columnsMeta : dbCols.map((name) => ({ name }));
+  const showMapping = !customSql && ((chartData as any)?.__showColumnMapping === true || (chartData?.kind === "db-table" && effectiveVizType !== "table" && !mapping));
+
+  const pivotLineDb = useMemo(() => {
+    if (!pivotConfig) return null;
+    if (!pivotResult) return null;
+    if (!(effectiveVizType === "line" || effectiveVizType === "area")) return null;
+
+    // Use pre-formatted data from Worker to avoid sync computation on main thread
+    const lineData = (pivotResult as any).lineChartData;
+    if (!lineData || !Array.isArray(lineData.cols) || !Array.isArray(lineData.rows)) return null;
+    if (lineData.cols.length === 0 || lineData.rows.length === 0) return null;
+
+    return { cols: lineData.cols, rows: lineData.rows };
+  }, [pivotConfig, pivotResult, effectiveVizType]);
+
+  const y2Cols = Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : [];
+  const y2Set = useMemo(() => {
+    const s = new Set<string>();
+    for (const m of y2Cols) {
+      const c = String((m as any)?.col ?? "").trim();
+      if (c) s.add(c);
+    }
+    return s;
+  }, [y2Cols]);
+  const hasY2 = y2Set.size > 0;
+
+  const portableChartConfig = useMemo(() => {
+    if (!chartData || typeof chartData !== "object") return null;
+    const cfg = (chartData as any).chartConfig;
+    return (cfg && typeof cfg === "object") ? cfg : null;
+  }, [chartData]);
+
+  const configBg = portableChartConfig?.general?.backgroundColor;
+  const containerBgStyle = useMemo(() => {
+    const bg = configBg;
+    if (!bg || typeof bg !== "string") return undefined;
+    if (bg === "transparent") return undefined;
+    return { backgroundColor: bg } as const;
+  }, [configBg]);
+
+  const renderDbNoRows = () => {
     return (
-      <div className="w-full h-full p-2 bg-slate-950">
-        <UPlotTrendModule
-          data={data}
-          xKey="ts"
-          series={[{ key: "v", name: "Value", stroke: theme === 'dark' ? "#10b981" : "#000" }]}
-          height={Math.max(120, height - 8)}
-          chartId={chartId}
-          groupId={groupId}
+      <div className="w-full h-full flex items-center justify-center bg-slate-950">
+        <div className="text-sm text-slate-400">No rows</div>
+      </div>
+    );
+  };
+
+  const renderDbUniversalFallback = () => {
+    if (chartData?.kind !== "db-table") return null;
+    if (!hasDbData || (dbCols?.length ?? 0) === 0) return renderDbNoRows();
+    try {
+      const cols = pivotLineDb?.cols ?? dbCols;
+      const rows = pivotLineDb?.rows ?? dbRows;
+      const colTypes = cols.map((c: string, idx: number) => detectColType(rows, idx, c));
+      const axes = pickAxes(cols, colTypes, { mapping: mapping as any });
+      const built = buildDbChartOption({
+        vizType: effectiveVizType,
+        cols,
+        colTypes,
+        rows,
+        axes,
+        mapping: mapping as any,
+      });
+      if (built?.option) {
+        return (
+          <div className="w-full h-full p-2">
+            <BaseChart
+              option={withConfig(built.option as any)}
+              height={Math.max(160, height - 8)}
+              chartId={chartId}
+              groupId={groupId}
+            />
+          </div>
+        );
+      }
+    } catch {}
+    return null;
+  };
+
+  const renderDbTableFallback = () => {
+    const universal = renderDbUniversalFallback();
+    if (universal) return universal;
+    if ((dbCols?.length ?? 0) > 0) {
+      return (
+        <div className="w-full h-full p-2 bg-slate-950 overflow-auto" style={containerBgStyle as any}>
+          <table className="w-full text-xs border-separate border-spacing-0">
+            <thead>
+              <tr>
+                {dbCols.map((c) => (
+                  <th
+                    key={c}
+                    className="sticky top-0 z-10 text-left font-semibold text-slate-200 bg-slate-950/95 backdrop-blur border-b border-white/10 px-2 py-1"
+                  >
+                    {c}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {dbRows.slice(0, 200).map((row, rIdx) => (
+                <tr key={rIdx} className={rIdx % 2 === 0 ? "bg-white/0" : "bg-white/5"}>
+                  {dbCols.map((_, cIdx) => (
+                    <td key={cIdx} className="border-b border-white/5 px-2 py-1 text-slate-100 whitespace-nowrap">
+                      {String((row as any[])?.[cIdx] ?? "")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+    return renderDbNoRows();
+  };
+
+  const creativeStyles = useMemo(
+    () => extractCreativeContainerStyles(portableChartConfig?.creative),
+    [portableChartConfig?.creative],
+  );
+
+  const withConfig = useCallback((opt: any) => {
+    try {
+      if (portableChartConfig && typeof portableChartConfig === "object") {
+        return applyChartConfigToEChartsOption(opt, portableChartConfig);
+      }
+    } catch {}
+    return opt;
+  }, [portableChartConfig]);
+
+  const BaseChart = useCallback(
+    ({ option, ...rest }: any) => {
+      const chart = <EChartsBaseChart option={withConfig(option)} {...rest} />;
+      if (!creativeStyles) return chart;
+      return <ChartGlowWrapper styles={creativeStyles}>{chart}</ChartGlowWrapper>;
+    },
+    [withConfig, creativeStyles]
+  );
+
+  if (chartData?.kind === "db-table" && effectiveVizType === "kpi") {
+    if (dbTableLoading || dbTableError) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          {dbTableLoading && <div className="text-sm text-slate-400">Loading data...</div>}
+          {dbTableError && <div className="text-sm text-rose-300">{dbTableError}</div>}
+        </div>
+      );
+    }
+
+    if (!hasDbData) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          <div className="text-sm text-slate-400">No rows</div>
+        </div>
+      );
+    }
+
+    const title = String(chartName ?? "").trim() || String(dbCols?.[0] ?? "").trim() || "KPI";
+    const rawVal = (dbRows?.[0] as any[])?.[0];
+    const numVal = rawVal == null ? null : Number(rawVal);
+    const display = (numVal != null && Number.isFinite(numVal))
+      ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(numVal)
+      : String(rawVal ?? "—");
+
+    return (
+      <div className="w-full h-full flex flex-col items-center justify-center bg-slate-950 p-4" style={containerBgStyle as any}>
+        <div className="text-xs text-slate-400 uppercase tracking-wider text-center">{title}</div>
+        <div className="text-5xl font-bold text-white mt-2 tabular-nums">{display}</div>
+      </div>
+    );
+  }
+
+  if (chartData?.kind === "db-table" && effectiveVizType === "table") {
+    if (pivotConfig) {
+      if (dbTableLoading) {
+        return (
+          <div className="w-full h-full flex items-center justify-center bg-slate-950">
+            <div className="text-sm text-slate-400">Loading data...</div>
+          </div>
+        );
+      }
+      if (dbTableError || pivotError) {
+        return (
+          <div className="w-full h-full flex items-center justify-center bg-slate-950">
+            <div className="text-sm text-rose-300">{pivotError ?? "Loading cohort pivot..."}</div>
+          </div>
+        );
+      }
+      if (!pivotResult) {
+        return (
+          <div className="w-full h-full flex items-center justify-center bg-slate-950">
+            <div className="text-sm text-slate-400">No cohort pivot data</div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="w-full h-full p-2 bg-slate-950" style={containerBgStyle as any}>
+          <CohortAnalysisChart
+            title={chartName}
+            result={pivotResult}
+            defaultViewMode="table"
+            height={Math.max(160, height - 8)}
+            theme={theme === "dark" ? "dark" : "light"}
+          />
+        </div>
+      );
+    }
+
+    if (dbTableLoading || dbTableError) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          {dbTableLoading && <div className="text-sm text-slate-400">Loading data...</div>}
+          {dbTableError && <div className="text-sm text-rose-300">{dbTableError}</div>}
+        </div>
+      );
+    }
+
+    if (!hasDbData) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          <div className="text-sm text-slate-400">No rows</div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="w-full h-full p-2 bg-slate-950" style={containerBgStyle as any}>
+        <VirtualizedTable
+          items={semanticTableRows}
+          height={Math.max(160, height - 8)}
+          colSpan={Math.max(1, dbCols.length)}
+          className="w-full"
+          headerClassName="sticky top-0 z-10 bg-slate-950/95 backdrop-blur"
+          renderHeader={
+            <TableRow>
+              {dbCols.map((c, idx) => {
+                const active = semanticTableSort?.column === idx;
+                const dir = active ? semanticTableSort?.dir : null;
+                return (
+                  <TableHeaderCell
+                    key={`${c}:${idx}`}
+                    className="text-left font-semibold text-slate-200 border-b border-white/10 px-2 py-1 cursor-pointer select-none hover:bg-white/5"
+                    onClick={() => {
+                      setSemanticTableSort((prev) => {
+                        if (!prev || prev.column !== idx) return { column: idx, dir: "asc" };
+                        if (prev.dir === "asc") return { column: idx, dir: "desc" };
+                        return null;
+                      });
+                    }}
+                  >
+                    <span className="inline-flex items-center gap-1">
+                      {c}
+                      {active ? (dir === "asc" ? "↑" : "↓") : ""}
+                    </span>
+                  </TableHeaderCell>
+                );
+              })}
+            </TableRow>
+          }
+          renderRow={(row, rowIdx) => {
+            return (
+              <TableRow className={rowIdx % 2 === 0 ? "bg-white/0" : "bg-white/5"}>
+                {dbCols.map((_, cIdx) => (
+                  <TableCell key={cIdx} className="border-b border-white/5 px-2 py-1 text-slate-100 whitespace-nowrap">
+                    {formatCellValue((row as any[])?.[cIdx], dbColTypes[cIdx] ?? "unknown")}
+                  </TableCell>
+                ))}
+              </TableRow>
+            );
+          }}
         />
       </div>
     );
   }
 
-  // Grouped bar
-  if (chartName.includes("Grouped bar")) {
-    const cats = ["A", "B", "C", "D"];
-    const series1 = [320, 240, 180, 120];
-    const series2 = [260, 200, 150, 100];
+  if (chartData?.kind === "db-table" && effectiveVizType === "pivot") {
+    if (dbTableLoading || dbTableError) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          {dbTableLoading && <div className="text-sm text-slate-400">Loading data...</div>}
+          {dbTableError && <div className="text-sm text-rose-300">{dbTableError}</div>}
+        </div>
+      );
+    }
+    if (!hasDbData) return renderDbNoRows();
+
+    const rowField = String((mapping as any)?.detailsColumns?.[0] ?? "pivot_row").trim();
+    const colField = String((mapping as any)?.details2Columns?.[0] ?? "pivot_col").trim();
+    const valField = String((mapping as any)?.yColumns?.[0]?.col ?? "pivot_value").trim();
+
+    const rowIdx = dbCols.indexOf(rowField) >= 0 ? dbCols.indexOf(rowField) : dbCols.indexOf("pivot_row");
+    const colIdx = dbCols.indexOf(colField) >= 0 ? dbCols.indexOf(colField) : dbCols.indexOf("pivot_col");
+    const valIdx = dbCols.indexOf(valField) >= 0 ? dbCols.indexOf(valField) : dbCols.indexOf("pivot_value");
+    if (rowIdx < 0 || colIdx < 0 || valIdx < 0) return renderDbTableFallback();
+
+    const rowKeys = Array.from(new Set(dbRows.map((r: any) => String((r as any[])?.[rowIdx] ?? "")).filter(Boolean))).slice(0, 200);
+    const colKeys = Array.from(new Set(dbRows.map((r: any) => String((r as any[])?.[colIdx] ?? "")).filter(Boolean))).slice(0, 200);
+    const matrix = new Map<string, Map<string, number>>();
+    for (const rk of rowKeys) matrix.set(rk, new Map<string, number>());
+    for (const row of dbRows) {
+      const rk = String((row as any[])?.[rowIdx] ?? "");
+      const ck = String((row as any[])?.[colIdx] ?? "");
+      const v = Number((row as any[])?.[valIdx] ?? 0);
+      if (!rk || !ck) continue;
+      const rowMap = matrix.get(rk) ?? new Map<string, number>();
+      rowMap.set(ck, (rowMap.get(ck) ?? 0) + (Number.isFinite(v) ? v : 0));
+      matrix.set(rk, rowMap);
+    }
+
+    return (
+      <div className="w-full h-full p-2 bg-slate-950 overflow-auto" style={containerBgStyle as any}>
+        <table className="w-full text-xs border-separate border-spacing-0">
+          <thead>
+            <tr>
+              <th className="sticky top-0 z-10 text-left font-semibold text-slate-200 bg-slate-950/95 backdrop-blur border-b border-white/10 px-2 py-1">{rowField || "Rows"}</th>
+              {colKeys.map((ck) => (
+                <th key={ck} className="sticky top-0 z-10 text-right font-semibold text-slate-200 bg-slate-950/95 backdrop-blur border-b border-white/10 px-2 py-1">{ck}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rowKeys.map((rk, rIdx) => {
+              const rowMap = matrix.get(rk) ?? new Map<string, number>();
+              return (
+                <tr key={`${rk}_${rIdx}`} className={rIdx % 2 === 0 ? "bg-white/0" : "bg-white/5"}>
+                  <td className="border-b border-white/5 px-2 py-1 text-slate-100 whitespace-nowrap font-semibold">{rk}</td>
+                  {colKeys.map((ck) => (
+                    <td key={`${rk}_${ck}`} className="border-b border-white/5 px-2 py-1 text-slate-100 whitespace-nowrap text-right tabular-nums">
+                      {new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(Number(rowMap.get(ck) ?? 0))}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  if (chartData?.kind === "db-table" && showMapping) {
+    if ((mappingColumns?.length ?? 0) === 0) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          <div className="text-sm text-slate-400">Loading columns...</div>
+        </div>
+      );
+    }
+    const modal = (
+      <div className="fixed inset-0 z-[1000]">
+        <div className="absolute inset-0 bg-black/60" />
+        <div className="absolute inset-0 overflow-auto">
+          <div className="min-h-full flex items-center justify-center p-4">
+            <div className="w-full max-w-[560px]">
+              <ColumnMappingPanel
+                chartName={chartName}
+                columns={mappingColumns}
+                initialMapping={mapping}
+                vizTypeOverride={effectiveVizType as BuilderVizType}
+                variant="card"
+                onApply={(next) => {
+                  if (!chartId) return;
+                  try {
+                    window.dispatchEvent(
+                      new CustomEvent("dashboard:update-chart-data", {
+                        detail: {
+                          chartId,
+                          patch: { columnMapping: next, __showColumnMapping: false },
+                        },
+                      })
+                    );
+                  } catch {}
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+
+    if (typeof document === "undefined") {
+      return modal;
+    }
+
+    return createPortal(modal, document.body);
+  }
+
+  if (chartData?.kind === "db-table" && effectiveVizType === "donut") {
+    const built = renderDbUniversalFallback();
+    if (built) return built;
+    return renderDbNoRows();
+  }
+
+  // Render the appropriate chart content (all existing branches)
+  let renderedChart: React.ReactNode = null;
+
+  const lc = String(chartName ?? "").toLowerCase();
+
+  // Power BI: Matrix (mock)
+  if (lc === "matrix") {
+    return (
+      <div className="w-full h-full p-3 bg-slate-950" style={containerBgStyle as any}>
+        <div className="rounded-xl overflow-hidden border border-white/10">
+          <div className="px-3 py-2 bg-white/5 border-b border-white/10 text-xs font-semibold text-slate-200">Matrix (mock)</div>
+          <div className="p-3 text-xs text-slate-400">Matrix визуал пока в виде заглушки.</div>
+        </div>
+      </div>
+    );
+  }
+
+  // Power BI: Map / Filled map / Azure map (mock)
+  if (lc === "map" || lc === "filled map" || lc === "azure map") {
+    return (
+      <div className="w-full h-full p-3 bg-slate-950" style={containerBgStyle as any}>
+        <div className="w-full h-full rounded-2xl border border-white/10 bg-white/5 flex items-center justify-center">
+          <div className="text-center">
+            <div className="text-sm font-semibold text-slate-200">{chartName}</div>
+            <div className="text-xs text-slate-400 mt-1">Map визуалы пока в виде моков.</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Power BI: Gauge (mock)
+  if (lc === "gauge") {
+    const option: any = {
+      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
+      series: [
+        {
+          type: 'gauge',
+          startAngle: 200,
+          endAngle: -20,
+          min: 0,
+          max: 100,
+          progress: { show: true, width: 12 },
+          axisLine: { lineStyle: { width: 12 } },
+          axisTick: { show: false },
+          splitLine: { length: 8, lineStyle: { width: 2 } },
+          axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' },
+          pointer: { width: 4 },
+          detail: { valueAnimation: true, formatter: '{value}%', color: theme === 'dark' ? '#fff' : '#000' },
+          data: [{ value: 72, name: 'Gauge' }],
+        },
+      ],
+    };
+    return (
+      <div className="w-full h-full p-2">
+        <BaseChart option={option} height={Math.max(180, height - 8)} chartId={chartId} groupId={groupId} />
+      </div>
+    );
+  }
+
+  // Power BI: Card / Multi-row card / KPI (mock/simple)
+  if (lc === "card" || lc === "multi-row card" || lc === "kpi") {
+    const isMulti = lc === "multi-row card";
+    const title = chartName;
+    const seed = stableHash01(String(chartId ?? title));
+    return (
+      <div className="w-full h-full p-3 bg-slate-950 flex items-center justify-center" style={containerBgStyle as any}>
+        <div className="w-full max-w-[520px] rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="text-xs uppercase tracking-wider text-slate-400">{title}</div>
+          {isMulti ? (
+            <div className="mt-3 space-y-2">
+              {["Metric A", "Metric B", "Metric C"].map((k) => (
+                <div key={k} className="flex items-center justify-between px-3 py-2 rounded-xl border border-white/10 bg-white/5">
+                  <div className="text-xs text-slate-200">{k}</div>
+                  <div className="text-xs font-semibold text-white">{Math.round(1000 + seed * 9000).toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-3">
+              <div className="text-3xl font-semibold text-white">{Math.round(1000 + seed * 9000).toLocaleString()}</div>
+              <div className="text-xs text-emerald-400 mt-1">+{(seed * 20).toFixed(1)}%</div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Power BI: Combo charts (dual axis)
+  if (lc === "line and clustered column chart" || lc === "line and stacked column chart") {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    if (chartData?.kind === "db-table" && !dbXY) {
+      return renderDbTableFallback();
+    }
+    const x = dbXY ? dbXY.xLabels : Array.from({ length: 12 }, (_, i) => `M${i + 1}`);
+    const series = dbXY && dbXY.series.length > 0
+      ? dbXY.series
+      : [
+          { name: 'Column', data: x.map((_, i) => Math.round(100 + stableHash01(`${chartId ?? chartName}:combo:col:${i}`) * 80)) },
+          { name: 'Line', data: x.map((_, i) => Math.round(40 + stableHash01(`${chartId ?? chartName}:combo:line:${i}`) * 30)) },
+        ];
+    const colSeriesName = String(series[0]?.name ?? 'Column');
+    const lineSeriesName = String(series[1]?.name ?? 'Line');
+    const isStacked = lc === "line and stacked column chart";
+
+    const option: any = {
+      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
+      tooltip: { trigger: 'axis' },
+      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
+      grid: { left: 40, right: 56, top: 28, bottom: 28, containLabel: true },
+      xAxis: { type: 'category', data: x },
+      yAxis: [
+        { type: 'value' },
+        { type: 'value', position: 'right', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
+      ],
+      series: [
+        { type: 'bar', name: colSeriesName, data: (series[0]?.data ?? []), yAxisIndex: 0, barMaxWidth: 22, ...(isStacked ? { stack: 'total' } : {}), itemStyle: { borderRadius: [6,6,0,0] } },
+        { type: 'line', name: lineSeriesName, data: (series[1]?.data ?? []), yAxisIndex: 1, smooth: true, showSymbol: false },
+      ],
+    };
+
+    return (
+      <div className="w-full h-full p-2">
+        <BaseChart option={option} height={Math.max(180, height - 8)} chartId={chartId} groupId={groupId} />
+      </div>
+    );
+  }
+
+  if ((chartData as any)?.kind === "slicer" || chartName === "Slicer") {
+    if (!chartId) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          <div className="text-sm text-slate-400">Slicer requires a chartId</div>
+        </div>
+      );
+    }
+    renderedChart = (
+      <SlicerVisual
+        chartId={chartId}
+        chartData={chartData}
+        pageKey={effectivePageKey}
+        onPatchChartData={(patch) => {
+          try {
+            window.dispatchEvent(
+              new CustomEvent("dashboard:update-chart-data", {
+                detail: {
+                  chartId,
+                  patch: {
+                    kind: "slicer",
+                    ...patch,
+                  },
+                },
+              })
+            );
+          } catch {}
+        }}
+      />
+    );
+  }
+
+  // Show loading/error overlay for DB-connected charts
+  else if (chartData?.kind === "db-table" && (dbTableLoading || dbTableError)) {
+    renderedChart = (
+      <div className="w-full h-full flex items-center justify-center bg-slate-950">
+        {dbTableLoading && <div className="text-sm text-slate-400">Loading data...</div>}
+        {dbTableError && <div className="text-sm text-rose-300">{dbTableError}</div>}
+      </div>
+    );
+  }
+  // Generic: Line (time series) / Power BI: Line chart
+  else if (chartName.includes("Line (time series)") || lc === "line chart") {
+    const dbTs = hasDbData ? toTimeSeries(dbCols, dbRows) : null;
+    const strokes = ["#10b981", "#3b82f6", "#f59e0b", "#ef4444", "#8b5cf6"];
+    if (dbTs) {
+      renderedChart = (
+        <ChartGlowWrapper styles={creativeStyles}>
+          <div className="w-full h-full p-2 bg-slate-950" style={containerBgStyle as any}>
+            <UPlotTrendModule
+              data={dbTs.data}
+              xKey="ts"
+              series={dbTs.seriesKeys.map((sk, i) => ({ key: sk.key, name: sk.name, stroke: strokes[i % strokes.length] }))}
+              height={Math.max(120, height - 8)}
+              chartId={chartId}
+              groupId={groupId}
+            />
+          </div>
+        </ChartGlowWrapper>
+      );
+    } else {
+      if (chartData?.kind === "db-table") {
+        renderedChart = renderDbTableFallback();
+      } else {
+        const data = apiLineData ?? Array.from({ length: 24 }, (_, i) => ({
+          ts: Date.now() - (23 - i) * 3600_000,
+          v: 100 + Math.sin(i / 3) * 20 + stableHash01(`${chartId ?? chartName}:line:${i}`) * 10,
+        }));
+        renderedChart = (
+          <ChartGlowWrapper styles={creativeStyles}>
+            <div className="w-full h-full p-2 bg-slate-950" style={containerBgStyle as any}>
+              <UPlotTrendModule
+                data={data}
+                xKey="ts"
+                series={[{ key: "v", name: "Value", stroke: theme === 'dark' ? "#10b981" : "#000" }]}
+                height={Math.max(120, height - 8)}
+                chartId={chartId}
+                groupId={groupId}
+              />
+            </div>
+          </ChartGlowWrapper>
+        );
+      }
+    }
+  }
+
+  // Power BI: Clustered column chart
+  else if (lc === "clustered column chart") {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
+    const seriesData = dbXY
+      ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } }))
+      : [
+          { name: 'Series 1', type: 'bar' as const, data: [320, 240, 180, 120], barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } },
+        ];
     const option: any = {
       backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
       legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 32, containLabel: true },
+      grid: { left: 40, right: hasY2 ? 56 : 24, top: 28, bottom: 32, containLabel: true },
       xAxis: { type: 'category', data: cats },
-      yAxis: { type: 'value' },
-      series: [
-        { name: 'Series 1', type: 'bar', data: series1, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } },
-        { name: 'Series 2', type: 'bar', data: series2, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } },
-      ],
+      yAxis: hasY2 ? ([{ type: 'value' }, { type: 'value', position: 'right', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } }] as any) : ({ type: 'value' } as any),
+      series: seriesData,
     };
-    return (
+    renderedChart = (
+      <div className="w-full h-full p-2">
+        <BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} />
+      </div>
+    );
+  }
+
+  // Power BI: Clustered bar chart (horizontal)
+  else if (lc === "clustered bar chart") {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
+    const seriesData = dbXY
+      ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } }))
+      : [
+          { name: 'Series 1', type: 'bar' as const, data: [320, 240, 180, 120], barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } },
+        ];
+    const option: any = {
+      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
+      grid: { left: 80, right: hasY2 ? 56 : 24, top: 28, bottom: 32, containLabel: true },
+      xAxis: hasY2 ? ([{ type: 'value' }, { type: 'value', position: 'top', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } }] as any) : ({ type: 'value' } as any),
+      yAxis: { type: 'category', data: cats },
+      series: seriesData,
+    };
+    renderedChart = (
+      <div className="w-full h-full p-2">
+        <BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} />
+      </div>
+    );
+  }
+
+  // Grouped bar (legacy)
+  else if (chartName.includes("Grouped bar")) {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
+    const seriesData = dbXY
+      ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } }))
+      : [
+          { name: 'Series 1', type: 'bar' as const, data: [320, 240, 180, 120], barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } },
+          { name: 'Series 2', type: 'bar' as const, data: [260, 200, 150, 100], barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } },
+        ];
+    const option: any = {
+      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
+      grid: { left: 40, right: hasY2 ? 56 : 24, top: 28, bottom: 32, containLabel: true },
+      xAxis: { type: 'category', data: cats },
+      yAxis: hasY2 ? ([{ type: 'value' }, { type: 'value', position: 'right', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } }] as any) : ({ type: 'value' } as any),
+      series: seriesData,
+    };
+    renderedChart = (
       <div className="w-full h-full p-2">
         <BaseChart
           option={option}
@@ -182,14 +1697,20 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
             try {
               chart.off?.('click');
               chart.on?.('click', (params: any) => {
-                const name = String(params?.name ?? "");
-                if (name) addPropertyFilter({ key: 'category', operator: 'eq', value: name });
+                const isDb = chartData?.kind === "db-table";
+                const drillCols = Array.isArray((chartData as any)?.columnMapping?.drilldownColumns)
+                  ? (chartData as any).columnMapping.drilldownColumns
+                  : [];
+                if (isDb && drillCols.length > 0) {
+                  handleDrillDown();
+                }
               });
 
-              const sp = new URLSearchParams({
-                startDate: dateRange.start.toISOString(),
-                endDate: dateRange.end.toISOString(),
-              });
+              if (chartData?.kind === "db-table") return;
+
+              const sp = new URLSearchParams();
+              if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
+              if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
               for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
               fetch(`/api/rest/analytics-traffic?${sp.toString()}`, { cache: 'no-store' })
                 .then(r => r.json())
@@ -198,13 +1719,13 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
                   const cats = rows.map(r => String(r.category ?? ''));
                   const v = rows.map(r => Number(r.value ?? 0));
                   const rev = rows.map(r => Number(r.revenue ?? 0));
-                  chart.setOption({
+                  chart.setOption(withConfig({
                     xAxis: { data: cats },
                     series: [
                       { name: 'Events', type: 'bar', data: v, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } },
                       { name: 'Revenue', type: 'bar', data: rev, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } },
                     ],
-                  });
+                  }));
                 })
                 .catch(() => {});
             } catch {}
@@ -214,24 +1735,78 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
     );
   }
 
-  // Stacked bar
-  if (chartName.includes("Stacked bar")) {
-    const cats = ["A", "B", "C", "D"];
-    const series1 = [120, 132, 101, 134];
-    const series2 = [220, 182, 191, 234];
+  // Power BI: Stacked column chart (vertical)
+  else if (lc === "stacked column chart") {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
+    const seriesData = dbXY
+      ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, stack: 'total', data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } }))
+      : [
+          { name: 'Series 1', type: 'bar' as const, stack: 'total', data: [120, 132, 101, 134], barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } },
+          { name: 'Series 2', type: 'bar' as const, stack: 'total', data: [220, 182, 191, 234], barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } },
+        ];
     const option: any = {
       backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
       legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 32, containLabel: true },
+      grid: { left: 40, right: hasY2 ? 56 : 24, top: 28, bottom: 32, containLabel: true },
       xAxis: { type: 'category', data: cats },
-      yAxis: { type: 'value' },
-      series: [
-        { name: 'Series 1', type: 'bar', stack: 'total', data: series1, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] } },
-        { name: 'Series 2', type: 'bar', stack: 'total', data: series2, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] } },
-      ],
+      yAxis: hasY2 ? ([{ type: 'value' }, { type: 'value', position: 'right', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } }] as any) : ({ type: 'value' } as any),
+      series: seriesData,
     };
-    return (
+    renderedChart = (
+      <div className="w-full h-full p-2">
+        <BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} />
+      </div>
+    );
+  }
+
+  // Power BI: Stacked bar chart (horizontal)
+  else if (lc === "stacked bar chart") {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
+    const seriesData = dbXY
+      ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, stack: 'total', data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } }))
+      : [
+          { name: 'Series 1', type: 'bar' as const, stack: 'total', data: [120, 132, 101, 134], barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } },
+          { name: 'Series 2', type: 'bar' as const, stack: 'total', data: [220, 182, 191, 234], barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } },
+        ];
+    const option: any = {
+      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
+      grid: { left: 80, right: hasY2 ? 56 : 24, top: 28, bottom: 32, containLabel: true },
+      xAxis: hasY2 ? ([{ type: 'value' }, { type: 'value', position: 'top', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } }] as any) : ({ type: 'value' } as any),
+      yAxis: { type: 'category', data: cats },
+      series: seriesData,
+    };
+    renderedChart = (
+      <div className="w-full h-full p-2">
+        <BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} />
+      </div>
+    );
+  }
+
+  // Stacked bar (legacy)
+  else if (chartName.includes("Stacked bar")) {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
+    const seriesData = dbXY
+      ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, stack: 'total', data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } }))
+      : [
+          { name: 'Series 1', type: 'bar' as const, stack: 'total', data: [120, 132, 101, 134], barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } },
+          { name: 'Series 2', type: 'bar' as const, stack: 'total', data: [220, 182, 191, 234], barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } },
+        ];
+    const option: any = {
+      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
+      grid: { left: 40, right: hasY2 ? 56 : 24, top: 28, bottom: 32, containLabel: true },
+      xAxis: { type: 'category', data: cats },
+      yAxis: hasY2 ? ([{ type: 'value' }, { type: 'value', position: 'right', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } }] as any) : ({ type: 'value' } as any),
+      series: seriesData,
+    };
+    renderedChart = (
       <div className="w-full h-full p-2">
         <BaseChart
           option={option}
@@ -242,13 +1817,20 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
             try {
               chart.off?.('click');
               chart.on?.('click', (params: any) => {
-                const name = String(params?.name ?? "");
-                if (name) addPropertyFilter({ key: 'category', operator: 'eq', value: name });
+                const isDb = chartData?.kind === "db-table";
+                const drillCols = Array.isArray((chartData as any)?.columnMapping?.drilldownColumns)
+                  ? (chartData as any).columnMapping.drilldownColumns
+                  : [];
+                if (isDb && drillCols.length > 0) {
+                  handleDrillDown();
+                }
               });
-              const sp = new URLSearchParams({
-                startDate: dateRange.start.toISOString(),
-                endDate: dateRange.end.toISOString(),
-              });
+
+              if (chartData?.kind === "db-table") return;
+
+              const sp = new URLSearchParams();
+              if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
+              if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
               for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
               fetch(`/api/rest/analytics-traffic?${sp.toString()}`, { cache: 'no-store' })
                 .then(r => r.json())
@@ -257,13 +1839,13 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
                   const cats = rows.map(r => String(r.category ?? ''));
                   const v = rows.map(r => Number(r.value ?? 0));
                   const rev = rows.map(r => Number(r.revenue ?? 0));
-                  chart.setOption({
+                  chart.setOption(withConfig({
                     xAxis: { data: cats },
                     series: [
                       { name: 'Events', type: 'bar', stack: 'total', data: v, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] } },
                       { name: 'Revenue', type: 'bar', stack: 'total', data: rev, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] } },
                     ],
-                  });
+                  }));
                 })
                 .catch(() => {});
             } catch {}
@@ -273,21 +1855,25 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
     );
   }
 
-  // Area (накопление)
-  if (chartName.includes("Area") && chartName.includes("накоп")) {
-    const x = Array.from({ length: 24 }, (_, i) => new Date(Date.now() - (23 - i) * 3600_000));
-    const y = x.map((_, i) => Math.round(80 + i * 4 + Math.sin(i / 2) * 10));
+  // Generic: Area / Power BI: Area chart
+  else if ((chartName.includes("Area") && chartName.includes("накоп")) || lc === "area chart") {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    if (chartData?.kind === "db-table" && !dbXY) {
+      return renderDbTableFallback();
+    }
+    const x = dbXY ? dbXY.xLabels : Array.from({ length: 24 }, (_, i) => new Date(Date.now() - (23 - i) * 3600_000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    const areaSeries = dbXY
+      ? dbXY.series.map(s => ({ type: 'line' as const, name: s.name, data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, smooth: true, areaStyle: {}, showSymbol: false }))
+      : [{ type: 'line' as const, name: 'Value', data: Array.from({ length: 24 }, (_, i) => Math.round(80 + i * 4 + Math.sin(i / 2) * 10)), smooth: true, areaStyle: {}, showSymbol: false }];
     const option: any = {
       backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
       tooltip: { trigger: 'axis' },
-      grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x.map(d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) },
-      yAxis: { type: 'value' },
-      series: [
-        { type: 'line', name: 'Value', data: y, smooth: true, areaStyle: {}, showSymbol: false },
-      ],
+      grid: { left: 40, right: hasY2 ? 56 : 24, top: 20, bottom: 28, containLabel: true },
+      xAxis: { type: 'category', data: x },
+      yAxis: hasY2 ? ([{ type: 'value' }, { type: 'value', position: 'right', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } }] as any) : ({ type: 'value' } as any),
+      series: areaSeries,
     };
-    return (
+    renderedChart = (
       <div className="w-full h-full p-2">
         <BaseChart
           option={option}
@@ -296,10 +1882,10 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
           groupId={groupId}
           onReady={(chart: any) => {
             try {
-              const sp = new URLSearchParams({
-                startDate: dateRange.start.toISOString(),
-                endDate: dateRange.end.toISOString(),
-              });
+              if (chartData?.kind === "db-table") return;
+              const sp = new URLSearchParams();
+              if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
+              if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
               for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
               fetch(`/api/rest/analytics-trend?${sp.toString()}`, { cache: 'no-store' })
                 .then(r => r.json())
@@ -307,10 +1893,10 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
                   if (!Array.isArray(rows) || rows.length === 0) return;
                   const xs = rows.map(r => new Date(Number(r.ts))).map(d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
                   const ev = rows.map(r => Number(r.events ?? 0));
-                  chart.setOption({
+                  chart.setOption(withConfig({
                     xAxis: { data: xs },
                     series: [{ type: 'line', name: 'Events', data: ev, smooth: true, areaStyle: {}, showSymbol: false }],
-                  });
+                  }));
                 })
                 .catch(() => {});
             } catch {}
@@ -320,24 +1906,29 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
     );
   }
 
-  // Stacked area
-  if (chartName.includes("Stacked area")) {
-    const x = Array.from({ length: 24 }, (_, i) => new Date(Date.now() - (23 - i) * 3600_000));
-    const s1 = x.map((_, i) => Math.round(40 + i * 2 + Math.sin(i / 2) * 6));
-    const s2 = x.map((_, i) => Math.round(30 + i * 1.5 + Math.cos(i / 3) * 5));
+  // Generic: Stacked area / Power BI: Stacked area chart
+  else if (chartName.includes("Stacked area") || lc === "stacked area chart") {
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    if (chartData?.kind === "db-table" && !dbXY) {
+      return renderDbTableFallback();
+    }
+    const xData = dbXY ? dbXY.xLabels : Array.from({ length: 24 }, (_, i) => new Date(Date.now() - (23 - i) * 3600_000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    const stackSeries = dbXY
+      ? dbXY.series.map(s => ({ type: 'line' as const, name: s.name, data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, smooth: true, areaStyle: {}, showSymbol: false, stack: 'total' }))
+      : [
+          { type: 'line' as const, name: 'S1', data: Array.from({ length: 24 }, (_, i) => Math.round(40 + i * 2 + Math.sin(i / 2) * 6)), smooth: true, areaStyle: {}, showSymbol: false, stack: 'total' },
+          { type: 'line' as const, name: 'S2', data: Array.from({ length: 24 }, (_, i) => Math.round(30 + i * 1.5 + Math.cos(i / 3) * 5)), smooth: true, areaStyle: {}, showSymbol: false, stack: 'total' },
+        ];
     const option: any = {
       backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
       tooltip: { trigger: 'axis' },
       legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x.map(d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) },
-      yAxis: { type: 'value' },
-      series: [
-        { type: 'line', name: 'S1', data: s1, smooth: true, areaStyle: {}, showSymbol: false, stack: 'total' },
-        { type: 'line', name: 'S2', data: s2, smooth: true, areaStyle: {}, showSymbol: false, stack: 'total' },
-      ],
+      grid: { left: 40, right: hasY2 ? 56 : 24, top: 28, bottom: 28, containLabel: true },
+      xAxis: { type: 'category', data: xData },
+      yAxis: hasY2 ? ([{ type: 'value' }, { type: 'value', position: 'right', axisLabel: { color: theme === 'dark' ? '#cbd5e1' : '#000' } }] as any) : ({ type: 'value' } as any),
+      series: stackSeries,
     };
-    return (
+    renderedChart = (
       <div className="w-full h-full p-2">
         <BaseChart
           option={option}
@@ -346,18 +1937,18 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
           groupId={groupId}
           onReady={(chart: any) => {
             try {
-              const sp = new URLSearchParams({
-                startDate: dateRange.start.toISOString(),
-                endDate: dateRange.end.toISOString(),
-              });
+              if (chartData?.kind === "db-table") return;
+              const sp = new URLSearchParams();
+              if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
+              if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
               for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
               fetch(`/api/rest/analytics-trend?${sp.toString()}`, { cache: 'no-store' })
                 .then(r => r.json())
                 .then((rows: any[]) => {
                   if (!Array.isArray(rows) || rows.length === 0) return;
                   const xs = rows.map(r => new Date(Number(r.ts))).map(d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-                  const s1 = rows.map(r => Number(r.events ?? 0));
-                  const s2 = rows.map(r => Number(r.users ?? 0));
+                  const s1 = rows.map((r: any) => Number(r?.events ?? 0)).map((v: number) => (Number.isFinite(v) ? v : 0));
+                  const s2 = rows.map((r: any) => Number(r?.users ?? 0)).map((v: number) => (Number.isFinite(v) ? v : 0));
                   chart.setOption({
                     xAxis: { data: xs },
                     series: [
@@ -374,979 +1965,22 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
     );
   }
 
-  // Multi-line (несколько метрик)
-  if (chartName.includes("Multi-line")) {
-    const x = Array.from({ length: 14 }, (_, i) => new Date(Date.now() - (13 - i) * 24 * 3600_000).toLocaleDateString([], { month: 'short', day: '2-digit' }));
-    const s1 = x.map((_, i) => Math.round(80 + Math.sin(i / 2) * 15 + Math.random() * 10));
-    const s2 = x.map((_, i) => Math.round(60 + Math.cos(i / 3) * 12 + Math.random() * 8));
-    const s3 = x.map((_, i) => Math.round(40 + Math.sin(i / 4) * 10 + Math.random() * 6));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis' },
-      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x },
-      yAxis: { type: 'value' },
-      series: [
-        { type: 'line', name: 'Metric A', data: s1, smooth: true, showSymbol: false },
-        { type: 'line', name: 'Metric B', data: s2, smooth: true, showSymbol: false },
-        { type: 'line', name: 'Metric C', data: s3, smooth: true, showSymbol: false },
-      ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} />
-      </div>
-    );
-  }
-
-  // Rolling average
-  if (chartName.includes("Rolling average")) {
-    const x = Array.from({ length: 30 }, (_, i) => i + 1);
-    const raw = x.map((i) => Math.round(100 + Math.sin(i / 3) * 20 + Math.random() * 10));
-    const ma = raw.map((_, idx, arr) => {
-      const start = Math.max(0, idx - 6);
-      const slice = arr.slice(start, idx + 1);
-      return Math.round(slice.reduce((a, b) => a + b, 0) / slice.length);
-    });
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis' },
-      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x.map(String) },
-      yAxis: { type: 'value' },
-      series: [
-        { type: 'line', name: 'Raw', data: raw, smooth: true, showSymbol: false, lineStyle: { opacity: 0.4 } },
-        { type: 'line', name: 'MA(7)', data: ma, smooth: true, showSymbol: false },
-      ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} />
-      </div>
-    );
-  }
-
-  // Period-over-period comparison (WoW/MoM)
-  if (chartName.includes("Period-over-period")) {
-    const x = Array.from({ length: 14 }, (_, i) => `D${i + 1}`);
-    const current = x.map((_, i) => Math.round(120 + Math.sin(i / 2) * 12 + Math.random() * 8));
-    const prior = x.map((_, i) => Math.round(100 + Math.sin(i / 2) * 10 + Math.random() * 6));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis' },
-      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x },
-      yAxis: { type: 'value' },
-      series: [
-        { type: 'line', name: 'Current', data: current, smooth: true, showSymbol: false },
-        { type: 'line', name: 'Prior', data: prior, smooth: true, showSymbol: false, lineStyle: { type: 'dashed', opacity: 0.7 } },
-      ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} />
-      </div>
-    );
-  }
-
-  // Cumulative growth
-  if (chartName.includes("Cumulative growth")) {
-    const x = Array.from({ length: 20 }, (_, i) => i + 1);
-    const inc = x.map(() => Math.max(1, Math.round(5 + Math.random() * 8)));
-    const cum = inc.reduce<number[]>((arr, v) => { arr.push((arr.at(-1) ?? 0) + v); return arr; }, []);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis' },
-      grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x.map(String) },
-      yAxis: { type: 'value' },
-      series: [ { type: 'line', name: 'Cumulative', data: cum, smooth: true, areaStyle: {}, showSymbol: false } ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} />
-      </div>
-    );
-  }
-
-  // Rank / Top-N
-  if (chartName.includes("Rank") || chartName.includes("Top-N")) {
-    const cats = ["Alpha","Beta","Gamma","Delta","Epsilon","Zeta"].slice(0, 6);
-    const vals = cats.map((_, i) => Math.round(500 - i * 60 + Math.random() * 20));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      grid: { left: 80, right: 24, top: 16, bottom: 16, containLabel: true },
-      xAxis: { type: 'value' },
-      yAxis: { type: 'category', data: cats, inverse: true },
-      series: [ { type: 'bar', data: vals, barMaxWidth: 18, itemStyle: { borderRadius: [6,6,0,0] } } ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart option={option} height={Math.max(140, height - 8)} chartId={chartId} groupId={groupId} />
-      </div>
-    );
-  }
-
-  // Bottom-N
-  if (chartName.includes("Bottom-N")) {
-    const cats = ["Alpha","Beta","Gamma","Delta","Epsilon","Zeta"].slice(0, 6).reverse();
-    const vals = cats.map((_, i) => Math.round(50 + i * 20 + Math.random() * 10));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      grid: { left: 80, right: 24, top: 16, bottom: 16, containLabel: true },
-      xAxis: { type: 'value' },
-      yAxis: { type: 'category', data: cats, inverse: true },
-      series: [ { type: 'bar', data: vals, barMaxWidth: 18, itemStyle: { borderRadius: [6,6,0,0] } } ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart option={option} height={Math.max(140, height - 8)} chartId={chartId} groupId={groupId} />
-      </div>
-    );
-  }
-
-  // Side-by-side comparison
-  if (chartName.includes("Side-by-side")) {
-    const cats = ["A","B","C","D","E"];
-    const a = cats.map(() => Math.round(100 + Math.random() * 80));
-    const b = cats.map(() => Math.round(90 + Math.random() * 80));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: cats },
-      yAxis: { type: 'value' },
-      series: [
-        { type: 'bar', name: 'A', data: a, barMaxWidth: 18, itemStyle: { borderRadius: [6,6,0,0] } },
-        { type: 'bar', name: 'B', data: b, barMaxWidth: 18, itemStyle: { borderRadius: [6,6,0,0] } },
-      ],
-    };
-    return (
-      <div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>
-    );
-  }
-
-  // 100% stacked bar
-  if (chartName.includes("100% stacked bar")) {
-    const cats = ["A","B","C","D"];
-    const s1 = cats.map(() => Math.round(20 + Math.random() * 50));
-    const s2 = cats.map(() => Math.round(20 + Math.random() * 50));
-    const total = s1.map((v, i) => v + s2[i]);
-    const p1 = s1.map((v, i) => Math.round((v / total[i]) * 100));
-    const p2 = s2.map((v, i) => 100 - p1[i]);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (p: any) => `${p[0].name}<br/>${p[0].seriesName}: ${p[0].value}%<br/>${p[1].seriesName}: ${p[1].value}%` },
-      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: cats },
-      yAxis: { type: 'value', max: 100 },
-      series: [
-        { type: 'bar', name: 'Part A', stack: 'pct', data: p1, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } },
-        { type: 'bar', name: 'Part B', stack: 'pct', data: p2, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } },
-      ],
-    };
-    return (
-      <div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>
-    );
-  }
-
-  // Treemap
-  if (chartName.includes("Treemap")) {
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { formatter: '{b}: {c}' },
-      series: [
-        {
-          type: 'treemap',
-          breadcrumb: { show: false },
-          roam: false,
-          label: { show: true, formatter: '{b}' },
-          data: [
-            { name: 'A', value: 540 },
-            { name: 'B', value: 320 },
-            { name: 'C', value: 210 },
-            { name: 'D', value: 150 },
-          ],
-        },
-      ],
-    };
-    return (
-      <div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>
-    );
-  }
-
-  // Hierarchical breakdown (Sunburst-like using Treemap levels)
-  if (chartName.includes("Hierarchical breakdown")) {
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { formatter: '{b}: {c}' },
-      series: [
-        {
-          type: 'treemap',
-          breadcrumb: { show: false },
-          roam: false,
-          label: { show: true },
-          data: [
-            { name: 'Group A', value: 600, children: [ { name: 'A1', value: 320 }, { name: 'A2', value: 280 } ] },
-            { name: 'Group B', value: 400, children: [ { name: 'B1', value: 250 }, { name: 'B2', value: 150 } ] },
-          ],
-        },
-      ],
-    };
-    return (
-      <div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>
-    );
-  }
-
-  // Histogram
-  if (chartName.includes("Histogram")) {
-    const bins = Array.from({ length: 12 }, () => Math.round(20 + Math.random() * 80));
-    const x = bins.map((_, i) => `${i * 10}-${(i + 1) * 10}`);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis' },
-      grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x },
-      yAxis: { type: 'value' },
-      series: [ { type: 'bar', data: bins, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } } ],
-    };
-    return (
-      <div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(140, height - 8)} chartId={chartId} groupId={groupId} /></div>
-    );
-  }
-
-  // Box plot
-  if (chartName.includes("Box plot")) {
-    // Data format: [min, Q1, median, Q3, max]
-    const cats = ['A','B','C','D'];
-    const data = cats.map(() => {
-      const min = Math.round(20 + Math.random() * 10);
-      const q1 = min + Math.round(10 + Math.random() * 10);
-      const med = q1 + Math.round(5 + Math.random() * 10);
-      const q3 = med + Math.round(5 + Math.random() * 10);
-      const max = q3 + Math.round(10 + Math.random() * 10);
-      return [min, q1, med, q3, max];
-    });
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'item' },
-      grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: cats },
-      yAxis: { type: 'value' },
-      series: [ { name: 'box', type: 'boxplot', data } ],
-    };
-    return (
-      <div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(140, height - 8)} chartId={chartId} groupId={groupId} /></div>
-    );
-  }
-
-  // Density plot (KDE-like)
-  if (chartName.includes("Density plot")) {
-    const x = Array.from({ length: 101 }, (_, i) => -3 + i * 0.06);
-    const y = x.map((t) => Math.round(100 * Math.exp(-0.5 * t * t)) / 100);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis' },
-      grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x.map((v) => v.toFixed(2)) },
-      yAxis: { type: 'value' },
-      series: [ { type: 'line', data: y, areaStyle: {}, smooth: true, showSymbol: false } ],
-    };
-    return (
-      <div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(140, height - 8)} chartId={chartId} groupId={groupId} /></div>
-    );
-  }
-
-  // Outlier view (scatter with highlights)
-  if (chartName.includes("Outlier")) {
-    const points = Array.from({ length: 80 }, () => ({ x: Math.random() * 100, y: Math.random() * 100 }));
-    const outliers = Array.from({ length: 5 }, () => ({ x: 20 + Math.random() * 10, y: 90 + Math.random() * 10 }));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'item' }, grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'value' }, yAxis: { type: 'value' },
-      series: [
-        { type: 'scatter', name: 'Points', data: points.map(p => [Math.round(p.x), Math.round(p.y)]) },
-        { type: 'scatter', name: 'Outliers', data: outliers.map(p => [Math.round(p.x), Math.round(p.y)]), itemStyle: { color: theme === 'dark' ? '#ef4444' : '#000' } },
-      ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // KPI card / KPI with delta (styled tile)
-  if (chartName.includes("KPI card") || chartName.includes("KPI with delta")) {
-    const value = Math.floor(Math.random() * 10000 + 1000).toLocaleString();
-    const delta = (Math.random() * 10 - 2).toFixed(1);
-    const isNeg = Number(delta) < 0;
-    return (
-      <div className="w-full h-full bg-gradient-to-br from-white/10 to-white/5 backdrop-blur-xl rounded-2xl border border-white/20 p-5 flex flex-col justify-between">
-        <div className="flex items-center justify-between">
-          <div className="p-2 bg-white/10 rounded-lg">
-            <svg className="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-          </div>
-          <div className={`text-xs font-semibold ${isNeg ? 'text-amber-400' : 'text-emerald-400'} bg-white/10 px-2 py-1 rounded`}>{isNeg ? '' : '+'}{delta}%</div>
-        </div>
-        <div className="text-right">
-          <Metric className="text-white text-2xl font-bold mb-1 leading-tight block">{value}</Metric>
-          <Text className="text-slate-300 text-xs font-medium">{chartName}</Text>
-        </div>
-      </div>
-    );
-  }
-
-  // Conversion rate (line %)
-  if (chartName.includes("Conversion rate") && !chartName.includes("Card")) {
-    const x = Array.from({ length: 14 }, (_, i) => `D${i + 1}`);
-    const y = x.map((_, i) => Math.round((2 + Math.sin(i / 3) * 0.8 + Math.random() * 0.6) * 10) / 10);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'axis' }, grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x }, yAxis: { type: 'value', axisLabel: { formatter: '{value}%' } },
-      series: [ { type: 'line', name: 'CR', data: y, smooth: true, showSymbol: false } ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(140, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // Scatter plot
-  if (chartName.includes("Scatter plot") && !chartName.includes("regression")) {
-    const pts = Array.from({ length: 100 }, () => [Math.round(50 + Math.random() * 50), Math.round(40 + Math.random() * 60)]);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'item' }, grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'value' }, yAxis: { type: 'value' }, series: [ { type: 'scatter', data: pts } ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // Scatter + regression
-  if (chartName.includes("Scatter + regression")) {
-    const pts = Array.from({ length: 80 }, () => [Math.round(50 + Math.random() * 50), Math.round(30 + Math.random() * 70)]);
-    // Simple linear fit mock: y = a + b*x
-    const a = 10, b = 0.8;
-    const line = Array.from({ length: 2 }, (_, i) => {
-      const x = i === 0 ? 40 : 110; return [x, a + b * x];
-    });
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'item' }, grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'value' }, yAxis: { type: 'value' },
-      series: [
-        { type: 'scatter', name: 'Samples', data: pts },
-        { type: 'line', name: 'Fit', data: line, showSymbol: false, lineStyle: { type: 'dashed' } },
-      ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // Correlation matrix (heatmap)
-  if (chartName.includes("Correlation matrix")) {
-    const vars = ['A','B','C','D','E'];
-    const data: Array<[number, number, number]> = [];
-    for (let i = 0; i < vars.length; i++) for (let j = 0; j < vars.length; j++) data.push([i, j, Math.round((i === j ? 1 : (Math.random() * 2 - 1)) * 100) / 100]);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { formatter: (p: any) => `${vars[p.data[1]]} vs ${vars[p.data[0]]}: ${p.data[2]}` },
-      grid: { left: 60, right: 24, top: 24, bottom: 40, containLabel: true },
-      xAxis: { type: 'category', data: vars }, yAxis: { type: 'category', data: vars },
-      visualMap: { min: -1, max: 1, calculable: false, orient: 'horizontal', left: 'center', bottom: 0 },
-      series: [ { type: 'heatmap', data } ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(200, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // Waterfall (contribution)
-  if (chartName.includes("Waterfall")) {
-    const cats = ['Start','A','B','C','D','End'];
-    const changes = [0, 120, -40, 80, -20, 0];
-    let sum = 300;
-    const start = [sum];
-    const up: number[] = []; const down: number[] = []; const totals: number[] = [];
-    for (let i = 1; i < cats.length - 1; i++) {
-      const ch = changes[i];
-      if (ch >= 0) { up.push(ch); down.push('-' as any); } else { up.push('-' as any); down.push(-ch); }
-      totals.push(sum); sum += ch;
-    }
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } }, legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 28, containLabel: true }, xAxis: { type: 'category', data: cats }, yAxis: { type: 'value' },
-      series: [
-        { type: 'bar', stack: 'total', data: [start[0], ...totals, '-'], itemStyle: { color: 'transparent' } },
-        { type: 'bar', name: 'Increase', stack: 'total', data: ['-', ...up, '-'] },
-        { type: 'bar', name: 'Decrease', stack: 'total', data: ['-', ...down, '-'] },
-      ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // Decomposition (drivers)
-  if (chartName.includes("Decomposition")) {
-    const cats = ['Price','Volume','Mix','Promo'];
-    const p = cats.map(() => Math.round(40 + Math.random() * 60));
-    const n = cats.map(() => -Math.round(Math.random() * 20));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } }, legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 24, top: 28, bottom: 28, containLabel: true }, xAxis: { type: 'category', data: cats }, yAxis: { type: 'value' },
-      series: [
-        { type: 'bar', name: 'Positive', data: p, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } },
-        { type: 'bar', name: 'Negative', data: n, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] } },
-      ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // Anomaly detection (time-based)
-  if (chartName.includes("Anomaly detection")) {
-    const x = Array.from({ length: 24 }, (_, i) => `${i}:00`);
-    const base = x.map((_, i) => Math.round(100 + Math.sin(i / 3) * 20 + Math.random() * 10));
-    const anomalies = [5, 17];
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'axis' }, grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x }, yAxis: { type: 'value' },
-      series: [
-        { type: 'line', name: 'Value', data: base, smooth: true, showSymbol: false },
-        { type: 'scatter', name: 'Anomaly', data: anomalies.map(i => [x[i], base[i]]), itemStyle: { color: theme === 'dark' ? '#ef4444' : '#000' }, symbolSize: 10 },
-      ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(160, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // Cohort analysis (heatmap grid)
-  if (chartName.includes("Cohort analysis")) {
-    return (
-      <div className="w-full h-full p-2 bg-slate-950">
-        <div className="grid grid-cols-7 gap-1">
-          {Array.from({ length: 28 }).map((_, i) => {
-            const intensity = Math.random();
-            const color = intensity > 0.7 ? 'bg-emerald-500/60' : intensity > 0.4 ? 'bg-emerald-500/40' : 'bg-emerald-500/20';
-            return (<div key={i} className={`h-4 ${color} rounded border border-emerald-500/20`} />);
-          })}
-        </div>
-      </div>
-    );
-  }
-
-  // Retention curve
-  if (chartName.includes("Retention curve")) {
-    const x = Array.from({ length: 12 }, (_, i) => `W${i + 1}`);
-    const y = x.map((_, i) => Math.max(0, Math.round(100 * Math.exp(-i / 6))));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'axis' }, grid: { left: 40, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: { type: 'category', data: x }, yAxis: { type: 'value', max: 100 },
-      series: [ { type: 'line', name: 'Retention %', data: y, smooth: true, showSymbol: false } ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(140, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // Graphics / Diagrams generic blocks
-  if (chartName === "Graphics" || chartName === "Diagrams") {
-    const x = ['Q1','Q2','Q3','Q4'];
-    const bar = x.map(() => Math.round(200 + Math.random() * 200));
-    const line = x.map((_, i) => Math.round(50 + i * 20 + Math.random() * 10));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', tooltip: { trigger: 'axis' }, legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      grid: { left: 40, right: 40, top: 28, bottom: 28, containLabel: true }, xAxis: { type: 'category', data: x }, yAxis: [{ type: 'value' }, { type: 'value' }],
-      series: [ { type: 'bar', name: 'Volume', data: bar, yAxisIndex: 0, barMaxWidth: 18, itemStyle: { borderRadius: [6,6,0,0] } }, { type: 'line', name: 'Index', data: line, yAxisIndex: 1, smooth: true, showSymbol: false } ],
-    };
-    return (<div className="w-full h-full p-2"><BaseChart option={option} height={Math.max(180, height - 8)} chartId={chartId} groupId={groupId} /></div>);
-  }
-
-  // KPI vs target (Bullet) / Bullet chart
-  if (chartName.includes("Bullet chart") || chartName.includes("KPI vs target")) {
-    // Single-category bullet: actual value bar with target markLine
-    const actual = 78; // % of target, demo
-    const target = 90;
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff', grid: { left: 60, right: 24, top: 28, bottom: 32, containLabel: true },
-      xAxis: { type: 'value', max: 100, splitLine: { show: false } },
-      yAxis: { type: 'category', data: ['KPI'], axisTick: { show: false } },
-      series: [
-        { type: 'bar', data: [actual], barWidth: 18, itemStyle: { borderRadius: [6,6,0,0] } },
-      ],
-      markLine: {
-        symbol: 'none',
-        label: { formatter: `Target ${target}%`, position: 'end' },
-        data: [{ xAxis: target }],
-      },
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart
-          option={option}
-          height={Math.max(120, height - 8)}
-          chartId={chartId}
-          groupId={groupId}
-          onReady={(chart: any) => {
-            try {
-              const sp = new URLSearchParams({
-                startDate: dateRange.start.toISOString(),
-                endDate: dateRange.end.toISOString(),
-              });
-              for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
-              fetch(`/api/rest/analytics-trend?${sp.toString()}`, { cache: 'no-store' })
-                .then(r => r.json())
-                .then((rows: any[]) => {
-                  if (!Array.isArray(rows) || rows.length === 0) return;
-                  const revs = rows.map(r => Number(r.revenue ?? 0)).filter((n: number) => Number.isFinite(n));
-                  const last = revs.length ? revs[revs.length - 1] : 0;
-                  const avg = revs.length ? (revs.reduce((a: number, b: number) => a + b, 0) / revs.length) : 0;
-                  const actualPct = Math.max(0, Math.min(100, Math.round((avg > 0 ? (last / avg) * 100 : 0))));
-                  const target = 90;
-                  chart.setOption({
-                    series: [{ type: 'bar', data: [actualPct], barWidth: 18, itemStyle: { borderRadius: [6,6,0,0] } }],
-                    xAxis: { max: 100 },
-                    markLine: { symbol: 'none', label: { formatter: `Target ${target}%`, position: 'end' }, data: [{ xAxis: target }] },
-                  });
-                })
-                .catch(() => {});
-            } catch {}
-          }}
-        />
-      </div>
-    );
-  }
-
-  // Pivot table / Drill-down table / Drill-through view / Filter panel — скелеты
-  if (chartName.includes("Pivot table") || chartName.includes("Drill-down table") || chartName.includes("Drill-through view") || chartName.includes("Filter panel")) {
-    return (
-      <div className="w-full h-full p-4 bg-slate-950">
-        {chartName.includes('Filter panel') ? (
-          <div className="space-y-3">
-            <div className="flex gap-2">
-              <input placeholder="Filter key" className="px-2 py-1 rounded bg-slate-800 text-slate-200 text-xs border border-white/10 w-1/3" />
-              <input placeholder="Value" className="px-2 py-1 rounded bg-slate-800 text-slate-200 text-xs border border-white/10 w-1/3" />
-              <button className="px-2 py-1 rounded bg-white/10 text-xs text-slate-100 border border-white/20">Apply</button>
-            </div>
-            <div className="text-xs text-slate-400">Interactive filter controls (demo)</div>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            <div className="flex gap-2 pb-1 border-b border-white/10">
-              <div className="h-3 bg-emerald-500/40 rounded w-1/4" />
-              <div className="h-3 bg-blue-500/40 rounded w-1/4" />
-              <div className="h-3 bg-purple-500/40 rounded w-1/4" />
-              <div className="h-3 bg-cyan-500/40 rounded w-1/4" />
-            </div>
-            {[1,2,3,4,5].map((i) => (
-              <div key={i} className="flex gap-2 items-center">
-                <div className="h-2 bg-slate-700/50 rounded w-1/4" />
-                <div className="h-2 bg-slate-700/40 rounded w-1/4" />
-                <div className="h-2 bg-slate-700/40 rounded w-1/4" />
-                <div className="h-2 bg-slate-700/30 rounded w-1/4" />
-              </div>
-            ))}
-            <div className="text-xs text-slate-500">{chartName}</div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // Generic: Bar (categorical)
-  if (chartName.includes("Bar (categorical)")) {
-    const data = apiBarCatData ?? [
-      { category: "A", value: 320 },
-      { category: "B", value: 240 },
-      { category: "C", value: 180 },
-      { category: "D", value: 120 },
-    ];
-    return (
-      <div className="w-full h-full p-2 bg-slate-950">
-        <BarChartModule
-          data={data}
-          index="category"
-          valueKey="value"
-          height={Math.max(120, height - 8)}
-          color={theme === 'dark' ? "#3b82f6" : "#000"}
-          chartId={chartId}
-          groupId={groupId}
-          onBarClick={(row) => {
-            const v = String((row as any)?.category ?? "");
-            if (v) addPropertyFilter({ key: "category", operator: "eq", value: v });
-          }}
-        />
-      </div>
-    );
-  }
-
-  // Generic: Pie / Donut
-  if (chartName.includes("Pie") || chartName.includes("Donut")) {
-    const data = [
-      { name: "Group A", value: 480 },
-      { name: "Group B", value: 340 },
-      { name: "Group C", value: 210 },
-      { name: "Group D", value: 120 },
-    ];
-    const isDonut = chartName.toLowerCase().includes("donut");
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-      legend: { 
-        top: 0, 
-        textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' }, 
-        orient: 'horizontal',
-        data: data.map(d => d.name)
-      },
-      series: [
-        {
-          name: 'Composition',
-          type: 'pie',
-          radius: isDonut ? ['50%', '70%'] : ['0%', '65%'],
-          avoidLabelOverlap: false,
-          label: { show: false },
-          labelLine: { show: false },
-          data: data.map(d => ({ name: d.name, value: d.value })),
-          emphasis: { itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0,0,0,0.5)' } },
-        },
-      ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart
-          option={option}
-          height={Math.max(160, height - 8)}
-          chartId={chartId}
-          groupId={groupId}
-          onReady={(chart: any) => {
-            try {
-              chart.off?.("click");
-              chart.on?.("click", (params: any) => {
-                const name = String(params?.name ?? "");
-                if (name) addPropertyFilter({ key: "category", operator: "eq", value: name });
-              });
-              const sp = new URLSearchParams({
-                startDate: dateRange.start.toISOString(),
-                endDate: dateRange.end.toISOString(),
-              });
-              for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
-              fetch(`/api/rest/analytics-traffic?${sp.toString()}`, { cache: 'no-store' })
-                .then(r => r.json())
-                .then((rows: any[]) => {
-                  if (!Array.isArray(rows) || rows.length === 0) return;
-                  const sdata = rows.map(r => ({ name: String(r.category ?? ''), value: Number(r.value ?? 0) }));
-                  chart.setOption({ series: [{ data: sdata }] });
-                })
-                .catch(() => {});
-            } catch {}
-          }}
-        />
-      </div>
-    );
-  }
-  // Revenue & Users Trend — Diagram (Mixed bars + line, dual-axis)
-  if (chartName.includes("Revenue") && chartName.includes("Users") && chartName.includes("Trend") && chartName.includes("Diagram")) {
-    const xData = mockTrendData.map(d => new Date(d.ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }));
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis' },
-      grid: { left: 40, right: 40, top: 20, bottom: 24, containLabel: true },
-      legend: { textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-      xAxis: { type: 'category', data: xData, axisLabel: { color: theme === 'dark' ? '#94a3b8' : '#000' }, axisLine: { lineStyle: { color: theme === 'dark' ? '#334155' : '#000' } } },
-      yAxis: [
-        { type: 'value', axisLabel: { color: theme === 'dark' ? '#94a3b8' : '#000' }, splitLine: { lineStyle: { color: theme === 'dark' ? '#1f2937' : '#000' } } },
-        { type: 'value', axisLabel: { color: theme === 'dark' ? '#94a3b8' : '#000' }, splitLine: { show: false } },
-      ],
-      series: [
-        { type: 'bar', name: 'Revenue', data: mockTrendData.map(d => Math.round(d.revenue)), yAxisIndex: 0, itemStyle: { color: theme === 'dark' ? '#10b981' : '#000', borderRadius: [6,6,0,0] } },
-        { type: 'line', name: 'Users', data: mockTrendData.map(d => Math.round(d.users)), yAxisIndex: 1, smooth: true, lineStyle: { color: theme === 'dark' ? '#3b82f6' : '#000', width: 2 } },
-      ],
-    };
-
-    return (
-      <Card className="backdrop-blur-xl bg-gradient-to-br from-white/10 to-white/5 rounded-3xl border border-white/20 shadow-2xl p-6 w-full h-full">
-        <div className="mb-4">
-          <Title className="text-white text-xl">Revenue & Users Trend</Title>
-          <Text className="text-slate-300 mt-1">Monthly revenue and user growth with conversion rates</Text>
-          <div className="mt-4 flex justify-end">
-            <button className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-lg border border-white/20 text-sm transition-colors flex items-center gap-2">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-              </svg>
-              Export
-            </button>
-          </div>
-        </div>
-        <div className="rounded-2xl overflow-hidden border border-white/10">
-          <UPlotTrendModule
-            data={mockTrendData}
-            xKey="ts"
-            series={[
-              { key: "revenue", name: "Revenue", stroke: theme === 'dark' ? "#10b981" : "#000", forecastKey: "revenue_forecast" },
-              { key: "users", name: "Users", stroke: theme === 'dark' ? "#3b82f6" : "#000", forecastKey: "users_forecast" },
-              { key: "conversion", name: "Conversion", stroke: theme === 'dark' ? "#f59e0b" : "#000", forecastKey: "conversion_forecast" },
-            ]}
-            forecast={mockForecastData}
-            height={360}
-          />
-        </div>
-      </Card>
-    );
-  }
-
-  // Trend Chart (uPlot) - для других графиков
-  if (chartName.includes("Trend Chart")) {
-    return (
-      <div className="w-full h-full p-2 bg-slate-950">
-        <UPlotTrendModule
-          data={mockActivityData}
-          xKey="ts"
-          series={[
-            { key: "events", name: "Events", stroke: theme === 'dark' ? "#10b981" : "#000" },
-            { key: "users", name: "Users", stroke: theme === 'dark' ? "#3b82f6" : "#000" },
-          ]}
-          height={136}
-        />
-      </div>
-    );
-  }
-
-  // 24 Hour Activity - Точная копия из activity/page.tsx (адаптировано для рабочей области)
-  if (chartName.includes("24 Hour Activity")) {
-    // Точные данные из activity/page.tsx
-    const activityData = [
-      { time: "00:00", events: 120, users: 45, errors: 2 },
-      { time: "04:00", events: 80, users: 25, errors: 1 },
-      { time: "08:00", events: 340, users: 156, errors: 5 },
-      { time: "12:00", events: 520, users: 234, errors: 8 },
-      { time: "16:00", events: 480, users: 198, errors: 6 },
-      { time: "20:00", events: 290, users: 123, errors: 3 },
-      { time: "23:59", events: 150, users: 67, errors: 2 },
-    ];
-
-    // Точная трансформация данных из activity/page.tsx
-    const activityTrendData = activityData.map((d, idx) => {
-      const base = Date.now() - 24 * 60 * 60 * 1000;
-      const step = Math.floor((24 * 60 * 60 * 1000) / Math.max(1, activityData.length - 1));
-      return {
-        ts: base + idx * step,
-        events: d.events,
-        users: d.users,
-        errors: d.errors,
-        time: d.time,
-      };
-    });
-
-    return (
-      <Card className="backdrop-blur-xl bg-gradient-to-br from-white/10 to-white/5 rounded-3xl border border-white/20 shadow-2xl p-6 pb-3 w-full h-full flex flex-col">
-        <div className="mb-4 flex items-start justify-between">
-          <div>
-            <Title className="text-white text-lg">24 Hour Activity</Title>
-            <Text className="text-slate-300 mt-1 text-sm">Events, users and errors throughout the day</Text>
-          </div>
-          <button className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-lg border border-white/20 text-xs transition-colors flex items-center gap-2">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-            </svg>
-            Export
-          </button>
-        </div>
-        <div className="flex-1 min-h-0 relative">
-          <UPlotTrendModule
-            data={activityTrendData}
-            xKey="ts"
-            height={360}
-            series={[
-              { key: "events", name: "Events", stroke: theme === 'dark' ? "#f97316" : "#000" },
-              { key: "users", name: "Users", stroke: theme === 'dark' ? "#3b82f6" : "#000" },
-              { key: "errors", name: "Errors", stroke: theme === 'dark' ? "#ef4444" : "#000" },
-            ]}
-          />
-        </div>
-      </Card>
-    );
-  }
-
-  // Bar Chart Module (ECharts)
-  if (chartName.includes("Bar Chart Module")) {
-    return (
-      <div className="w-full h-full p-2 bg-slate-950">
-        <BarChartModule
-          data={mockBarData}
-          index="category"
-          valueKey="value"
-          height={136}
-          color={theme === 'dark' ? "#10b981" : "#000"}
-        />
-      </div>
-    );
-  }
-
-  // Event Types Distribution - Точная копия из activity/page.tsx (адаптировано для рабочей области)
-  if (chartName.includes("Event Types")) {
-    // Точные данные из activity/page.tsx
-    const eventTypeData = [
-      { category: "Page Views", value: 3420 },
-      { category: "Clicks", value: 2156 },
-      { category: "Form Submits", value: 892 },
-      { category: "Downloads", value: 445 },
-      { category: "Signups", value: 234 },
-      { category: "Searches", value: 389 },
-      { category: "Shares", value: 156 },
-    ];
-
-    return (
-      <Card className="backdrop-blur-xl bg-gradient-to-br from-white/10 to-white/5 rounded-3xl border border-white/20 shadow-2xl p-6 pb-3 w-full h-full flex flex-col">
-        <div className="mb-4 flex items-start justify-between">
-          <div>
-            <Title className="text-white text-lg">Event Types Distribution</Title>
-            <Text className="text-slate-300 mt-1 text-sm">Breakdown of user interactions by type</Text>
-          </div>
-          <button className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-lg border border-white/20 text-xs transition-colors flex items-center gap-2">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-            </svg>
-            Export
-          </button>
-        </div>
-        <div className="flex-1 min-h-0 relative">
-          <BarChartModule
-            data={eventTypeData}
-            index="category"
-            valueKey="value"
-            height={360}
-            color={theme === 'dark' ? "#a78bfa" : "#000"}
-          />
-        </div>
-      </Card>
-    );
-  }
-
-  // Real-time Metrics
-  if (chartName.includes("Real-time Metrics") || chartName.includes("Active Now")) {
-    return (
-      <div className="w-full h-full p-2 bg-slate-950 flex items-center justify-center">
-        <div className="text-center">
-          <Metric className="text-white text-2xl">{Math.floor(Math.random() * 1000 + 500)}</Metric>
-          <Text className="text-slate-400 text-xs mt-1">Live users</Text>
-        </div>
-      </div>
-    );
-  }
-
-  // Metrics Cards (Total Users, Active Users, Events, Conversion Rate)
-  if (chartName.includes("Total Users") || chartName.includes("Active Users") || 
-      chartName.includes("Events This Period") || chartName.includes("Conversion Rate") ||
-      chartName.includes("New Users") || chartName.includes("Churned Users") ||
-      chartName.includes("Response Time") || chartName.includes("Uptime")) {
-    const value = chartName.includes("Conversion") || chartName.includes("Uptime") 
-      ? `${(Math.random() * 5 + 2).toFixed(1)}%`
-      : chartName.includes("Response Time")
-      ? `${Math.floor(Math.random() * 200 + 100)}ms`
-      : Math.floor(Math.random() * 10000 + 1000).toLocaleString();
-    
-    const change = chartName.includes("Churned") ? "-2.1%" : "+12.5%";
-    const changeColor = chartName.includes("Churned") ? "text-amber-400" : "text-emerald-400";
-    
-    // Иконки для разных метрик
-    const getIcon = () => {
-      if (chartName.includes("Total Users") || chartName.includes("New Users") || chartName.includes("Active Users") || chartName.includes("Churned Users")) {
-        return (
-          <svg className="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-          </svg>
-        );
-      }
-      if (chartName.includes("Events") || chartName.includes("Total Events")) {
-        return (
-          <svg className="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-          </svg>
-        );
-      }
-      if (chartName.includes("Active Now")) {
-        return (
-          <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-          </svg>
-        );
-      }
-      if (chartName.includes("Response Time")) {
-        return (
-          <svg className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-        );
-      }
-      if (chartName.includes("Uptime")) {
-        return (
-          <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-        );
-      }
-      return (
-        <svg className="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-        </svg>
-      );
-    };
-    
-    return (
-      <div className="w-full h-full bg-gradient-to-br from-white/10 to-white/5 backdrop-blur-xl rounded-2xl border border-white/20 p-5 flex flex-col justify-between">
-        {/* Верхняя часть с иконкой и изменением */}
-        <div className="flex items-center justify-between">
-          <div className="p-2 bg-white/10 rounded-lg">
-            {getIcon()}
-          </div>
-          <div className={`text-xs font-semibold ${changeColor} bg-white/10 px-2 py-1 rounded`}>
-            {change}
-          </div>
-        </div>
-        
-        {/* Нижняя часть со значением и названием */}
-        <div className="text-right">
-          <Metric className="text-white text-2xl font-bold mb-1 leading-tight block">{value}</Metric>
-          <Text className="text-slate-300 text-xs font-medium">
-            {chartName.replace(" Module", "")}
-          </Text>
-        </div>
-      </div>
-    );
-  }
-
-  // Area Chart (unified ECharts)
-  if (chartName.includes("Area Chart") || chartName.includes("Activity Overview")) {
-    const x = mockAreaData.map(d => d.date);
-    const y = mockAreaData.map(d => d.value);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis' },
-      grid: { left: 32, right: 16, top: 8, bottom: 16, containLabel: true },
-      xAxis: { type: 'category', data: x },
-      yAxis: { type: 'value' },
-      series: [ { type: 'line', data: y, areaStyle: {}, smooth: true, showSymbol: false } ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart option={option} height={Math.max(120, height - 24)} chartId={chartId} groupId={groupId} />
-      </div>
-    );
-  }
-
-  // Bar List (unified ECharts horizontal bar)
-  if (chartName.includes("Bar List") || chartName.includes("Top Events")) {
-    const cats = mockBarListData.map(d => d.name);
-    const vals = mockBarListData.map(d => d.value);
-    const option: any = {
-      backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      grid: { left: 80, right: 16, top: 8, bottom: 8, containLabel: true },
-      xAxis: { type: 'value' },
-      yAxis: { type: 'category', data: cats, inverse: true },
-      series: [ { type: 'bar', data: vals, barMaxWidth: 12, itemStyle: { borderRadius: [6,6,0,0] } } ],
-    };
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart option={option} height={Math.max(120, height - 24)} chartId={chartId} groupId={groupId} />
-      </div>
-    );
-  }
-
   // Donut Chart (unified ECharts)
-  if (chartName.includes("Donut") || chartName.includes("Traffic")) {
-    const sortedData = [...mockDonutData].sort((a, b) => b.value - a.value);
+  if (chartData?.kind !== "db-table" && (chartName.includes("Donut") || chartName.includes("Traffic"))) {
+    const dbPie = hasDbData ? toPieData(dbCols, dbRows) : null;
+    if (chartData?.kind === "db-table" && !dbPie) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          <div className="text-sm text-slate-400">No rows</div>
+        </div>
+      );
+    }
+    const fallback = [
+      { name: "Desktop", value: Math.round(400 + stableHash01(`${chartId ?? chartName}:donut:desktop`) * 900) },
+      { name: "Mobile", value: Math.round(300 + stableHash01(`${chartId ?? chartName}:donut:mobile`) * 700) },
+      { name: "Tablet", value: Math.round(150 + stableHash01(`${chartId ?? chartName}:donut:tablet`) * 500) },
+    ];
+    const sortedData = dbPie ? dbPie : fallback.sort((a, b) => b.value - a.value);
     const total = sortedData.reduce((sum, d) => sum + d.value, 0);
     const option: any = {
       backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
@@ -1402,296 +2036,130 @@ export function ChartPreview({ chartName, chartType, width = 560, height = 360, 
     );
   }
 
-  // Interactive Dashboard
-  if (chartName.includes("Interactive Dashboard")) {
-    return (
-      <div className="w-full h-full p-2 bg-slate-950">
-        <UPlotTrendModule
-          data={mockTrendData}
-          xKey="ts"
-          series={[
-            { key: "events", name: "Events", stroke: theme === 'dark' ? "#10b981" : "#000" },
-            { key: "users", name: "Users", stroke: theme === 'dark' ? "#3b82f6" : "#000" },
-          ]}
-          height={136}
-        />
-      </div>
-    );
-  }
+  // Universal fallback for DB-connected Component Library visuals
+  const forceDbFallback = chartData?.kind === "db-table" && (
+    chartName.includes("Interactive Dashboard") ||
+    chartName.includes("Anomaly") ||
+    chartName.includes("Insight") ||
+    chartName.includes("Analyst") ||
+    chartName.includes("Cyber Funnel") ||
+    chartName.includes("Funnel") ||
+    chartName.includes("Retention") ||
+    chartName.includes("Pivot") ||
+    chartName.includes("User Flow") ||
+    chartName.includes("Sankey") ||
+    chartName.includes("Chart") && chartName.includes("Builder") ||
+    chartName.includes("Field List") ||
+    chartName.includes("Filter panel")
+  );
 
-  // Tables (styled mock with sorting)
-  if (chartName.includes("Table") || chartName.includes("Users Table") || chartName.includes("Events Table")) {
-    const rows = [
-      { name: 'Alpha', value: 1240, trend: 12.4 },
-      { name: 'Beta', value: 980, trend: -3.1 },
-      { name: 'Gamma', value: 730, trend: 5.9 },
-      { name: 'Delta', value: 540, trend: -1.4 },
-      { name: 'Epsilon', value: 420, trend: 2.2 },
-    ];
-    const sorted = [...rows].sort((a, b) => {
-      const dir = tableSort.dir === 'asc' ? 1 : -1;
-      if (tableSort.key === 'name') return a.name.localeCompare(b.name) * dir;
-      if (tableSort.key === 'value') return (a.value - b.value) * dir;
-      return (a.trend - b.trend) * dir;
+  if ((forceDbFallback || !renderedChart) && chartData?.kind === "db-table" && hasDbData && dbCols.length > 0) {
+    const colTypes = dbCols.map((c, idx) => detectColType(dbRows, idx, c));
+    const axes = pickAxes(dbCols, colTypes, { mapping: (chartData as any)?.columnMapping ?? null });
+    const built = buildDbChartOption({
+      vizType: effectiveVizType,
+      cols: dbCols,
+      colTypes,
+      rows: dbRows,
+      axes,
+      mapping: (chartData as any)?.columnMapping ?? null,
     });
-    const th = (key: 'name'|'value'|'trend', label: string) => (
-      <th
-        className="px-3 py-2 text-left text-xs font-semibold text-slate-300 cursor-pointer select-none"
-        onClick={() => setTableSort(prev => ({ key, dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc' }))}
-      >
-        <div className="inline-flex items-center gap-1">
-          <span>{label}</span>
-          <svg className={`w-3 h-3 ${tableSort.key === key ? 'text-white' : 'text-slate-500'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            {tableSort.key === key && tableSort.dir === 'asc' ? (
-              <path d="M12 5l6 6H6l6-6z" />
-            ) : (
-              <path d="M12 19l-6-6h12l-6 6z" />
-            )}
-          </svg>
-        </div>
-      </th>
-    );
-    return (
-      <div className="w-full h-full p-3 bg-slate-950">
-        <div className="rounded-xl overflow-hidden border border-white/10">
-          <table className="w-full text-sm">
-            <thead className="bg-white/5">
-              <tr>
-                {th('name','Name')}
-                {th('value','Value')}
-                {th('trend','Change')}
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((r, idx) => (
-                <tr key={r.name} className={idx % 2 === 0 ? 'bg-white/[0.02]' : ''}>
-                  <td className="px-3 py-2 text-slate-200">{r.name}</td>
-                  <td className="px-3 py-2 text-slate-300">{r.value.toLocaleString()}</td>
-                  <td className={`px-3 py-2 ${r.trend >= 0 ? 'text-emerald-300' : 'text-amber-300'}`}>{r.trend >= 0 ? '+' : ''}{r.trend}%</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  }
 
-  // Anomaly Cards
-  if (chartName.includes("Anomaly")) {
-    return (
-      <div className="w-full h-full p-3 bg-gradient-to-r from-red-950/40 to-orange-950/40 border border-red-500/30 rounded-lg flex items-center justify-center">
-        <div className="text-center">
-          <Text className="text-red-300 text-xs font-semibold mb-1">Critical Alert</Text>
-          <Metric className="text-white text-xl">3 Anomalies</Metric>
-        </div>
-      </div>
-    );
-  }
-
-  // Insight Feed / Analyst Insights
-  if (chartName.includes("Insight") || chartName.includes("Analyst")) {
-    return (
-      <div className="w-full h-full p-3 space-y-2 bg-slate-950">
-        {[1, 2].map((i) => (
-          <div key={i} className="backdrop-blur-xl bg-gradient-to-br from-white/10 to-white/5 border border-white/10 rounded-lg p-3">
-            <div className="flex items-start gap-2 mb-2">
-              <div className="w-2 h-2 rounded-full bg-lime-400 mt-1" />
-              <div className="flex-1">
-                <div className="h-2 bg-lime-400/30 rounded w-3/4 mb-2" />
-                <div className="h-2 bg-slate-600/30 rounded w-full" />
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  // Cyber Funnel
-  if (chartName.includes("Cyber Funnel") || chartName.includes("Funnel")) {
-    return (
-      <div className="w-full h-full p-3 bg-slate-950 flex items-center justify-center">
-        <div className="space-y-1 w-full">
-          {[100, 75, 50, 30].map((width, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <div 
-                className="h-6 bg-gradient-to-r from-emerald-500/40 to-blue-500/40 rounded border border-emerald-500/30"
-                style={{ width: `${width}%` }}
-              />
-              <Text className="text-xs text-slate-400">{100 - i * 20}%</Text>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  // Retention Matrix
-  if (chartName.includes("Retention")) {
-    return (
-      <div className="w-full h-full p-2 bg-slate-950">
-        <div className="grid grid-cols-7 gap-1">
-          {Array.from({ length: 28 }).map((_, i) => {
-            const intensity = Math.random();
-            const color = intensity > 0.7 ? 'bg-emerald-500/60' : intensity > 0.4 ? 'bg-emerald-500/40' : 'bg-emerald-500/20';
-            return (
-              <div key={i} className={`h-4 ${color} rounded border border-emerald-500/20`} />
-            );
-          })}
-        </div>
-      </div>
-    );
-  }
-
-  // User Flow / Sankey
-  if (chartName.includes("User Flow") || chartName.includes("Sankey")) {
-    return (
-      <div className="w-full h-full p-3 bg-slate-950 flex items-center justify-center">
-        <div className="relative w-full h-full">
-          {/* Simplified Sankey visualization */}
-          <div className="absolute left-0 top-1/4 w-1/3 space-y-2">
-            <div className="h-8 bg-blue-500/40 rounded-r-lg border-r-2 border-blue-400" />
-            <div className="h-6 bg-blue-500/30 rounded-r-lg border-r-2 border-blue-400" />
-          </div>
-          <div className="absolute right-0 top-1/3 w-1/3 space-y-2">
-            <div className="h-6 bg-emerald-500/40 rounded-l-lg border-l-2 border-emerald-400" />
-            <div className="h-8 bg-emerald-500/30 rounded-l-lg border-l-2 border-emerald-400" />
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Chart Builder - Line Chart
-  if (chartName.includes("Line Chart") && chartName.includes("Builder")) {
-    return (
-      <div className="w-full h-full p-3 bg-slate-950">
-        <div className="relative h-full">
-          <svg className="w-full h-full" viewBox="0 0 100 50">
-            <polyline
-              points="0,40 20,25 40,30 60,15 80,20 100,10"
-              fill="none"
-              stroke={theme === 'dark' ? "#10b981" : "#000"}
-              strokeWidth="2"
-              className="drop-shadow-[0_0_8px_rgba(16,185,129,0.6)]"
-            />
-          </svg>
-        </div>
-      </div>
-    );
-  }
-
-  // Chart Builder - Bar Chart
-  if (chartName.includes("Bar Chart") && chartName.includes("Builder")) {
-    return (
-      <div className="w-full h-full p-3 bg-slate-950 flex items-end gap-2">
-        {[60, 80, 45, 90, 70].map((height, i) => (
-          <div 
-            key={i} 
-            className="flex-1 bg-gradient-to-t from-emerald-500/60 to-blue-500/40 rounded-t border-t-2 border-emerald-400"
-            style={{ height: `${height}%` }}
+    if (built?.option) {
+      renderedChart = (
+        <div className="w-full h-full p-2">
+          <BaseChart
+            option={withConfig(built.option as any)}
+            height={Math.max(120, height - 24)}
+            chartId={chartId}
+            groupId={groupId}
           />
-        ))}
-      </div>
-    );
-  }
-
-  // Chart Builder - Table View
-  if (chartName.includes("Table View") || chartName.includes("Field List")) {
-    return (
-      <div className="w-full h-full p-3 bg-slate-950">
-        <div className="space-y-1">
-          {/* Header */}
-          <div className="flex gap-2 pb-1 border-b border-emerald-500/30">
-            <div className="h-3 bg-emerald-500/40 rounded w-1/3" />
-            <div className="h-3 bg-blue-500/40 rounded w-1/4" />
-            <div className="h-3 bg-purple-500/40 rounded w-1/4" />
-          </div>
-          {/* Rows */}
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="flex gap-2 items-center">
-              <div className="h-2 bg-slate-700/50 rounded w-1/3" />
-              <div className="h-2 bg-slate-700/40 rounded w-1/4" />
-              <div className="h-2 bg-slate-700/40 rounded w-1/4" />
-            </div>
-          ))}
         </div>
-      </div>
-    );
-  }
-
-  // Events Table
-  if (chartName.includes("Events Table")) {
-    return (
-      <div className="w-full h-full p-3 bg-slate-950">
-        <div className="space-y-1">
-          {/* Header with gradient */}
-          <div className="flex gap-2 pb-2 border-b border-lime-400/30">
-            <Text className="text-xs text-lime-400 font-semibold w-1/4">Event</Text>
-            <Text className="text-xs text-blue-400 font-semibold w-1/4">User</Text>
-            <Text className="text-xs text-purple-400 font-semibold w-1/4">Time</Text>
-            <Text className="text-xs text-emerald-400 font-semibold w-1/4">Value</Text>
+      );
+    } else if (built?.kpi) {
+      renderedChart = (
+        <div className="w-full h-full p-3 bg-slate-950 flex items-center justify-center">
+          <div className="w-full max-w-[520px] rounded-xl border border-white/10 bg-white/[0.04] p-4">
+            <Text className="text-slate-400 text-xs">{built.kpi.label}</Text>
+            <Metric className="text-white text-2xl mt-1">{built.kpi.value}</Metric>
+            {built.kpi.sub ? (
+              <Text className="text-slate-400 text-xs mt-1">{built.kpi.sub}</Text>
+            ) : null}
           </div>
-          {/* Rows with alternating opacity */}
-          {[1,2,3,4].map((i) => (
-            <div key={i} className={`flex gap-2 items-center ${i % 2 === 0 ? 'bg-white/5' : ''} rounded px-1`}>
-              <div className="h-2 bg-slate-600/50 rounded w-1/4" />
-              <div className="h-2 bg-slate-600/40 rounded w-1/4" />
-              <div className="h-2 bg-slate-600/40 rounded w-1/4" />
-              <div className="h-2 bg-emerald-500/30 rounded w-1/4" />
-            </div>
-          ))}
         </div>
-      </div>
-    );
-  }
-
-  // Traffic Breakdown (если не Donut)
-  if (chartName.includes("Traffic Breakdown") && !chartName.includes("Donut")) {
-    return (
-      <div className="w-full h-full p-2">
-        <BaseChart
-          option={{
-            backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-            tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-            legend: { top: 0, textStyle: { color: theme === 'dark' ? '#cbd5e1' : '#000' } },
-            series: [
-              {
-                name: 'Traffic',
-                type: 'pie',
-                radius: ['50%','70%'],
-                avoidLabelOverlap: false,
-                label: { show: false },
-                labelLine: { show: false },
-                data: mockDonutData.map(d => ({ name: d.name, value: d.value })),
-              },
-            ],
-          }}
-          height={Math.max(120, height - 24)}
-          chartId={chartId}
-          groupId={groupId}
-        />
-      </div>
-    );
+      );
+    }
   }
 
   // Default - ECharts Area (unified)
-  return (
-    <div className="w-full h-full p-2">
-      <BaseChart
-        option={{
-          backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
-          tooltip: { trigger: 'axis' },
-          grid: { left: 32, right: 16, top: 8, bottom: 16, containLabel: true },
-          xAxis: { type: 'category', data: mockAreaData.map(d => d.date) },
-          yAxis: { type: 'value' },
-          series: [ { type: 'line', data: mockAreaData.map(d => d.value), areaStyle: {}, smooth: true, showSymbol: false } ],
-        }}
-        height={Math.max(120, height - 24)}
-        chartId={chartId}
-        groupId={groupId}
-      />
-    </div>
-  );
-}
+  if (!renderedChart) {
+    if (chartData?.kind === "db-table") {
+      if (dbTableLoading) {
+        return (
+          <div className="w-full h-full flex items-center justify-center bg-slate-950">
+            <div className="text-sm text-slate-400">Loading</div>
+          </div>
+        );
+      }
+      if (dbTableError) {
+        return (
+          <div className="w-full h-full flex items-center justify-center bg-slate-950">
+            <div className="text-sm text-red-300">{String((dbTableError as any)?.message ?? dbTableError ?? "DB query failed")}</div>
+          </div>
+        );
+      }
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-slate-950">
+          <div className="text-sm text-slate-400">No rows</div>
+        </div>
+      );
+    }
+    renderedChart = (
+      <div className="w-full h-full p-2">
+        {(() => {
+          const fallback = Array.from({ length: 14 }, (_, i) => {
+            const seed = stableHash01(`${chartId ?? chartName}:default-area:${i}`);
+            return {
+              date: new Date(Date.now() - (13 - i) * 24 * 3600_000).toLocaleDateString([], { month: 'short', day: '2-digit' }),
+              value: Math.round(120 + Math.sin(i / 3) * 40 + seed * 20),
+            };
+          });
+          return (
+            <BaseChart
+              option={{
+                backgroundColor: theme === 'dark' ? 'transparent' : '#fff',
+                tooltip: { trigger: 'axis' },
+                grid: { left: 32, right: 16, top: 8, bottom: 16, containLabel: true },
+                xAxis: { type: 'category', data: fallback.map(d => d.date) },
+                yAxis: { type: 'value' },
+                series: [ { type: 'line', data: fallback.map(d => d.value), areaStyle: {}, smooth: true, showSymbol: false } ],
+              }}
+              height={Math.max(120, height - 24)}
+              chartId={chartId}
+              groupId={groupId}
+            />
+          );
+        })()}
+      </div>
+    );
+  }
+
+  if (chartData?.kind === "db-table" && drillCols.length > 0) {
+    const currentLevel = Math.max(-1, Math.min(drillCols.length - 1, drillLevel));
+    const activePath = drillCols.slice(0, currentLevel + 1);
+    return (
+      <div className="relative w-full h-full">
+        <DrillBreadcrumbControls
+          activePath={activePath}
+          canDrillUp={currentLevel >= 0}
+          canDrillDown={currentLevel + 1 < drillCols.length}
+          onDrillUp={handleDrillUp}
+          onDrillDown={handleDrillDown}
+        />
+        {renderedChart}
+      </div>
+    );
+  }
+
+  return renderedChart;
+});
