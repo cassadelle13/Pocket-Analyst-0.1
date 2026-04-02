@@ -1,0 +1,9 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`planner golden > generates stable SQL for core query patterns 1`] = `
+[
+  "SELECT m0.city as city, SUM(m0.revenue) as app_revenue FROM analytics.events m0  GROUP BY m0.city  ORDER BY app_revenue DESC LIMIT 50",
+  "SELECT m0.country as country, COUNT(DISTINCT m0.user_id) as app_users FROM analytics.events m0 WHERE m0.country IN ('DE') GROUP BY m0.country   ORDER BY app_users DESC OFFSET 20 ROWS FETCH NEXT 100 ROWS ONLY",
+  "SELECT m0.city as city, SUM(m0.revenue) as app_revenue FROM analytics.events m0  GROUP BY m0.city LIMIT 10",
+]
+`;

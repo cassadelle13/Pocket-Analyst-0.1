@@ -47,7 +47,7 @@ const GlobalFiltersContext = createContext<GlobalFiltersState | null>(null);
 
 export function GlobalFiltersProvider({ children }: { children: ReactNode }) {
   const [dateRange, setDateRange] = useState<DateRange | null>(null);
-  
+  const [isHydrated, setIsHydrated] = useState(false);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [propertyFilters, setPropertyFilters] = useState<PropertyFilter[]>([]);
 
@@ -164,12 +164,14 @@ export function GlobalFiltersProvider({ children }: { children: ReactNode }) {
 
   // Sync to URL on any state change
   useEffect(() => {
+    if (!isHydrated) return;
     syncToURL();
-  }, [dateRange, segments, propertyFilters]);
+  }, [dateRange, segments, propertyFilters, isHydrated]);
 
   // Sync from URL on mount
   useEffect(() => {
     syncFromURL();
+    setIsHydrated(true);
   }, []);
 
   const value: GlobalFiltersState = {

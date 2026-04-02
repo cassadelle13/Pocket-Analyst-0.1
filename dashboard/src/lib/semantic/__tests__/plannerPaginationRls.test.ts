@@ -1,4 +1,5 @@
 import { compileSemanticQuery } from "../planner";
+import { test } from "vitest";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -84,4 +85,6 @@ function main() {
   console.log("planner pagination/rls suite: OK");
 }
 
-main();
+test("planner pagination/rls suite", () => {
+  main();
+});

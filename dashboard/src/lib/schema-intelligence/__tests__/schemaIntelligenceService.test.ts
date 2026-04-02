@@ -1,4 +1,5 @@
 import { SchemaIntelligenceService } from "../SchemaIntelligenceService";
+import { test } from "vitest";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -38,4 +39,6 @@ function main() {
   console.log("schema intelligence service suite: OK");
 }
 
-main();
+test("schema intelligence service suite", () => {
+  main();
+});

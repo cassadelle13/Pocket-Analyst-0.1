@@ -28,7 +28,8 @@ async function queryClickHouse(query: string) {
     throw new Error(`API Client error: ${response.error}`);
   }
 
-  return response.data?.data as Array<Record<string, unknown>> || [];
+  const payload = response.data as { data?: Array<Record<string, unknown>> } | undefined;
+  return payload?.data ?? [];
 }
 
 function parseIntOr(value: string | null, fallback: number) {

@@ -63,11 +63,13 @@ const DIMENSION_TYPES = new Set([
  * Removes size specifiers, nullability, and converts to lowercase
  */
 function normalizeType(sqlType: string): string {
-  return sqlType
-    .toLowerCase()
-    .replace(/\(.*?\)/g, '')  // Remove size: varchar(255) → varchar
-    .replace(/\s+/g, '')       // Remove whitespace
-    .replace(/nullable/g, '')  // Remove nullable keyword
+  const raw = String(sqlType ?? "").toLowerCase();
+  const nullableWrapped = raw.match(/nullable\s*\(\s*([^)]+)\s*\)/);
+  const unwrapped = nullableWrapped?.[1] ? nullableWrapped[1] : raw;
+  return unwrapped
+    .replace(/\(.*?\)/g, "")   // Remove size: varchar(255) → varchar
+    .replace(/\s+/g, "")       // Remove whitespace
+    .replace(/nullable/g, "")  // Remove nullable keyword
     .trim();
 }
 

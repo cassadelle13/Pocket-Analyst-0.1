@@ -38,8 +38,16 @@ export function classifyFieldRef(ref: string, semanticModel: SemanticModelV1): S
 
   const dimensions = modelDef?.dimensions && typeof modelDef.dimensions === "object" ? modelDef.dimensions : {};
   const measures = modelDef?.measures && typeof modelDef.measures === "object" ? modelDef.measures : {};
+  const calculatedMeasures = modelDef?.calculatedMeasures && typeof modelDef.calculatedMeasures === "object"
+    ? modelDef.calculatedMeasures
+    : {};
+  const calculatedFields = modelDef?.calculatedFields && typeof modelDef.calculatedFields === "object"
+    ? modelDef.calculatedFields
+    : {};
 
   if (Object.prototype.hasOwnProperty.call(measures, fieldName)) return "measure";
+  if (Object.prototype.hasOwnProperty.call(calculatedMeasures, fieldName)) return "measure";
+  if (Object.prototype.hasOwnProperty.call(calculatedFields, fieldName)) return "measure";
   if (Object.prototype.hasOwnProperty.call(dimensions, fieldName)) {
     const dimType = String((dimensions as any)?.[fieldName]?.type ?? "").toLowerCase();
     if (dimType === "time") return "time";

@@ -10,7 +10,8 @@ interface DemoContextType {
 const DemoContext = createContext<DemoContextType | undefined>(undefined);
 
 export function DemoProvider({ children }: { children: ReactNode }) {
-  const [isDemoMode, setIsDemoMode] = useState(true);
+  // Default off: DB Explorer shows real schema first; demo tree is optional from Settings.
+  const [isDemoMode, setIsDemoMode] = useState(false);
 
   useEffect(() => {
     if (typeof window !== "undefined") {

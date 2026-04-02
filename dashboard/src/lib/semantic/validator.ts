@@ -1,5 +1,6 @@
 import type { SemanticModelV1 } from "./types";
 import type { LogicalQuery, SemanticQueryRequest } from "./types";
+import { SEMANTIC_REF_RE } from "./requestContext";
 
 function isObject(v: unknown): v is Record<string, any> {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -11,12 +12,7 @@ function safeIdent(id: string): boolean {
 
 function isRef(v: unknown): boolean {
   const s = String(v ?? "").trim();
-  if (!s) return false;
-  const idx = s.indexOf(".");
-  if (idx <= 0 || idx === s.length - 1) return false;
-  const m = s.slice(0, idx);
-  const f = s.slice(idx + 1);
-  return safeIdent(m) && safeIdent(f);
+  return !!s && SEMANTIC_REF_RE.test(s);
 }
 
 function isPivotMode(v: unknown): boolean {
@@ -277,7 +273,7 @@ export function validateSemanticModelV1(model: unknown): ValidateSemanticModelRe
           "eq", "neq", "in", "not_in", "between", "not_between",
           "gt", "gte", "lt", "lte", "contains", "icontains",
           "notcontains", "noticontains", "startswith", "istartswith",
-          "endswith", "iendswith", "isnull", "isnotnull",
+          "endswith", "iendswith", "isnull", "isnotnull", "top_n",
         ]);
         for (let i = 0; i < rls.length; i += 1) {
           const rr = rls[i];
@@ -322,6 +318,8 @@ function getFieldKind(model: SemanticModelV1, ref: string): "dimension" | "measu
   const m = (model as any)?.models?.[modelName];
   if (!m || typeof m !== "object") return "unknown";
   if (hasOwn((m as any)?.measures, field)) return "measure";
+  if (hasOwn((m as any)?.calculatedMeasures, field)) return "measure";
+  if (hasOwn((m as any)?.calculatedFields, field)) return "measure";
   if (hasOwn((m as any)?.dimensions, field)) return "dimension";
   return "unknown";
 }

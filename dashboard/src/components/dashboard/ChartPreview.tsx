@@ -19,6 +19,7 @@ import { applyChartConfigToEChartsOption, extractCreativeContainerStyles } from 
 import ChartGlowWrapper from "./ChartGlowWrapper";
 import { buildSemanticGlobalContext, buildSemanticRequestContext } from "../../lib/semantic/requestContext";
 import { buildAutoSemanticQueryPayload } from "../../lib/semantic/autoSemanticModel";
+import { validateLogicalQuery } from "../../lib/semantic/validator";
 import { buildExprContextForPipelineStep, canCompileAstToSql, extractDepsFromAst, getEditorDiagnostics, parseUiFormulaToAst, resolveTypedDeps, resolveUsedComputeClosure } from "../../lib/semantic/expressionEngine";
 import { getExprEngineRolloutMode } from "../../lib/semantic/exprRollout";
 import { SlicerVisual } from "./SlicerVisual";
@@ -28,12 +29,29 @@ import { detectTableColumnType, formatCellValue } from "../../lib/formatters";
 import type { PivotResult } from "../../lib/semantic/retentionResult";
 import type { PivotWorkerResponse } from "../../workers/retention.worker";
 import { computePivotResultSync } from "../../lib/semantic/pivotClientCompute";
+import { resolveSqlDialect } from "../../lib/sqlDialect";
+import { useChartBus } from "@/context/ChartInteractionBus";
+import { useCrossSelection } from "@/store/crossSelectionContext";
+import { resolveVisualInteractionMode, type VisualInteractionsMap } from "@/lib/visualInteractions";
+import { useVisualInteractions } from "@/store/visualInteractionsContext";
+import { computeEffectivePageKey } from "../../lib/computeEffectivePageKey";
 
 // Динамические импорты оригинальных компонентов
 const UPlotTrendModule = dynamic(() => import("../analytics/UPlotTrendModule"), { ssr: false });
 const BarChartModule = dynamic(() => import("../analytics/BarChartModule"), { ssr: false });
 const PulseGlobe = dynamic(() => import("../home/PulseGlobe"), { ssr: false });
 const UserConstellation = dynamic(() => import("../users/UserConstellation"), { ssr: false });
+
+const SOFT_QUERY_HINT_PREFIX = "__hint__:";
+
+function toSoftQueryHint(message: string): string {
+  return `${SOFT_QUERY_HINT_PREFIX}${String(message ?? "").trim()}`;
+}
+
+function readSoftQueryHint(message: string | null): string | null {
+  const raw = String(message ?? "");
+  return raw.startsWith(SOFT_QUERY_HINT_PREFIX) ? raw.slice(SOFT_QUERY_HINT_PREFIX.length).trim() : null;
+}
 
 
 interface ChartPreviewProps {
@@ -47,6 +65,8 @@ interface ChartPreviewProps {
   isEditMode?: boolean;
   onCellEdit?: (colIdx: number, rowIdx: number, value: string) => void;
 }
+
+type ChartDataState = "loading" | "data" | "no_data" | "error";
 
 function stableHash01(input: string): number {
   const s = String(input ?? "");
@@ -77,12 +97,87 @@ function uniqStrings(arr: unknown): string[] {
   return res;
 }
 
+export function getScopedBiFiltersForChart(input: {
+  biFilters: any[];
+  chartId?: string;
+  pageKey?: string;
+}): any[] {
+  const arr = Array.isArray(input.biFilters) ? input.biFilters : [];
+  const chartId = String(input.chartId ?? "").trim();
+  const pageKey = String(input.pageKey ?? "").trim();
+  return arr.filter((f: any) => {
+    const scope = (f?.scope === "report" || f?.scope === "page" || f?.scope === "visual") ? f.scope : "visual";
+    if (scope === "report") return true;
+    if (scope === "page") return !!pageKey && String(f?.pageKey ?? "").trim() === pageKey;
+    return !!chartId && String(f?.sourceChartId ?? "").trim() === chartId;
+  });
+}
+
+function renderSqlValue(v: unknown): string {
+  if (v == null) return "NULL";
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+function buildDirectSqlWhereFromBiFilters(filters: any[], dialect: "postgres" | "clickhouse" | "mssql"): string {
+  const clauses: string[] = [];
+  const ciLike = (col: string, pattern: string, negated = false) => {
+    if (dialect === "postgres") return `${col} ${negated ? "NOT ILIKE" : "ILIKE"} ${renderSqlValue(pattern)}`;
+    if (dialect === "clickhouse") {
+      const expr = `lowerUTF8(toString(${col})) LIKE lowerUTF8(${renderSqlValue(pattern)})`;
+      return negated ? `NOT (${expr})` : expr;
+    }
+    const expr = `LOWER(CAST(${col} AS NVARCHAR(MAX))) LIKE LOWER(${renderSqlValue(pattern)})`;
+    return negated ? `NOT (${expr})` : expr;
+  };
+  for (const f of filters) {
+    const fullField = String(f?.field ?? "").trim();
+    const field = fullField.includes(".") ? fullField.split(".").slice(-1)[0] : fullField;
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) continue;
+    const col = `"${field}"`;
+    const op = String(f?.op ?? "eq").trim();
+    const values = Array.isArray(f?.values) ? f.values : (f?.values != null ? [f.values] : []);
+    if (op === "eq") clauses.push(`${col} = ${renderSqlValue(values[0])}`);
+    else if (op === "neq") clauses.push(`${col} != ${renderSqlValue(values[0])}`);
+    else if (op === "gt") clauses.push(`${col} > ${renderSqlValue(values[0])}`);
+    else if (op === "gte") clauses.push(`${col} >= ${renderSqlValue(values[0])}`);
+    else if (op === "lt") clauses.push(`${col} < ${renderSqlValue(values[0])}`);
+    else if (op === "lte") clauses.push(`${col} <= ${renderSqlValue(values[0])}`);
+    else if (op === "between" && values.length >= 2) clauses.push(`${col} BETWEEN ${renderSqlValue(values[0])} AND ${renderSqlValue(values[1])}`);
+    else if (op === "not_between" && values.length >= 2) clauses.push(`${col} NOT BETWEEN ${renderSqlValue(values[0])} AND ${renderSqlValue(values[1])}`);
+    else if (op === "in") {
+      if (values.length === 0) clauses.push("1 = 0");
+      else clauses.push(`${col} IN (${values.map(renderSqlValue).join(", ")})`);
+    } else if (op === "not_in") {
+      if (values.length === 0) clauses.push("1 = 1");
+      else clauses.push(`${col} NOT IN (${values.map(renderSqlValue).join(", ")})`);
+    } else if (op === "contains" || op === "icontains") {
+      clauses.push(ciLike(col, `%${String(values[0] ?? "")}%`));
+    } else if (op === "notcontains" || op === "noticontains") {
+      clauses.push(ciLike(col, `%${String(values[0] ?? "")}%`, true));
+    } else if (op === "startswith" || op === "istartswith") {
+      clauses.push(ciLike(col, `${String(values[0] ?? "")}%`));
+    } else if (op === "endswith" || op === "iendswith") {
+      clauses.push(ciLike(col, `%${String(values[0] ?? "")}`));
+    } else if (op === "isnull") {
+      clauses.push(`${col} IS NULL`);
+    } else if (op === "isnotnull") {
+      clauses.push(`${col} IS NOT NULL`);
+    }
+  }
+  return clauses.join(" AND ");
+}
+
 export const ChartPreview = memo(function ChartPreview({ chartName, chartType, width = 560, height = 360, chartId, groupId, chartData, isEditMode, onCellEdit }: ChartPreviewProps) {
   const { propertyFilters, addPropertyFilter, removePropertyFilter, dateRange } = useGlobalFilters();
   const { filters: biFilters, version: biFilterVersion, pageScopeMode } = useBiFilters();
   const { theme } = useTheme();
   const { role } = useRole();
   const searchParams = useSearchParams();
+  const chartBus = useChartBus();
+  const { crossSelection, setCrossSelection, clearCrossSelection } = useCrossSelection();
+  const { visualInteractions } = useVisualInteractions();
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
 
   const [semanticArtifacts, setSemanticArtifacts] = useState<any>(null);
@@ -115,12 +210,85 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       setActiveTabId(tid);
     };
     window.addEventListener("dashboard:active-tab-id", handler as EventListener);
-    return () => window.removeEventListener("dashboard:active-tab-id", handler as EventListener);
+    const tabChangedHandler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const tid = String(detail?.tabId ?? detail?.activeTabId ?? "").trim();
+      setActiveTabId(tid || null);
+    };
+    window.addEventListener("dashboard:tab-changed", tabChangedHandler as EventListener);
+    return () => {
+      window.removeEventListener("dashboard:active-tab-id", handler as EventListener);
+      window.removeEventListener("dashboard:tab-changed", tabChangedHandler as EventListener);
+    };
   }, []);
 
   const effectivePageKey = useMemo(() => {
-    return pageScopeMode === "tab" ? (activeTabId ? String(activeTabId) : "tab:unknown") : "dashboard";
+    return computeEffectivePageKey(pageScopeMode, activeTabId);
   }, [pageScopeMode, activeTabId]);
+
+  /** Single source for scoped BI filters on this visual (semantic, direct SQL, legacy REST). */
+  const scopedBiFiltersForThisChart = useMemo(
+    () =>
+      getScopedBiFiltersForChart({
+        biFilters: Array.isArray(biFilters) ? biFilters : [],
+        chartId,
+        pageKey: effectivePageKey,
+      }),
+    [biFilters, chartId, effectivePageKey]
+  );
+  const interactionModeForThisChart = useMemo(() => {
+    const sourceChartId = String(crossSelection?.sourceChartId ?? "").trim();
+    if (!sourceChartId || !chartId) return "none";
+    return resolveVisualInteractionMode({
+      sourceChartId,
+      targetChartId: chartId,
+      targetChartType: chartType,
+      map: (visualInteractions ?? null) as VisualInteractionsMap | null,
+    });
+  }, [crossSelection, chartId, chartType, visualInteractions]);
+  const transientCrossFilter = useMemo(() => {
+    if (interactionModeForThisChart !== "filter") return null;
+    const sourceChartId = String(crossSelection?.sourceChartId ?? "").trim();
+    const field = String(crossSelection?.field ?? "").trim();
+    const value = String(crossSelection?.value ?? "").trim();
+    if (!sourceChartId || !chartId || sourceChartId === chartId || !field || !value) return null;
+    return {
+      field,
+      op: "eq" as const,
+      values: [value],
+      scope: "report" as const,
+      sourceChartId,
+      logicGroup: `crossfilter:${sourceChartId}`,
+    };
+  }, [interactionModeForThisChart, crossSelection, chartId]);
+  const scopedBiFiltersWithCross = useMemo(
+    () => transientCrossFilter
+      ? [...scopedBiFiltersForThisChart, transientCrossFilter]
+      : scopedBiFiltersForThisChart,
+    [scopedBiFiltersForThisChart, transientCrossFilter]
+  );
+
+  const appendLegacyFilterParams = useCallback((sp: URLSearchParams) => {
+    if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
+    if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
+    for (const f of propertyFilters) {
+      sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+    }
+    for (const f of scopedBiFiltersWithCross) {
+      const field = String(f?.field ?? "").trim();
+      if (!field) continue;
+      const key = field.includes(".") ? field.split(".").slice(-1)[0] : field;
+      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) continue;
+      const op = String(f?.op ?? "eq").trim();
+      const values = Array.isArray(f?.values) ? f.values : (f?.values != null ? [f.values] : []);
+      if (op === "isnull" || op === "isnotnull") {
+        sp.set(`prop_${key}`, `${op}:1`);
+        continue;
+      }
+      if (values.length === 0) continue;
+      sp.set(`prop_${key}`, `${op}:${values.map((v: any) => String(v)).join(",")}`);
+    }
+  }, [dateRange?.start, dateRange?.end, propertyFilters, scopedBiFiltersWithCross]);
   const drillCols = useMemo(() => {
     const mapping = (chartData as any)?.columnMapping;
     return Array.isArray(mapping?.drilldownColumns)
@@ -131,6 +299,22 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
     const raw = Number((chartData as any)?.__drillLevel ?? -1);
     return Number.isFinite(raw) ? raw : -1;
   }, [chartData]);
+  const clickField = useMemo(() => {
+    const logicalQuery = (chartData as any)?.logicalQuery;
+    const dimensions = Array.isArray(logicalQuery?.dimensions) ? logicalQuery.dimensions : [];
+    const firstDim = String(dimensions[0] ?? "").trim();
+    if (firstDim) return firstDim;
+    const mapping = (chartData as any)?.columnMapping;
+    const fromX = String(mapping?.xColumn ?? "").trim();
+    if (fromX) return fromX;
+    const fromCategory = String(mapping?.category ?? "").trim();
+    if (fromCategory) return fromCategory;
+    return "";
+  }, [chartData]);
+  const isDrillModeChart = useMemo(() => {
+    const isDb = String((chartData as any)?.kind ?? "").trim() === "db-table";
+    return isDb && drillCols.length > 0;
+  }, [chartData, drillCols.length]);
   const applyChartPatch = useCallback((patch: Record<string, unknown>) => {
     if (!chartId) return;
     try {
@@ -151,15 +335,46 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
   const handleDrillUp = useCallback(() => {
     if (!chartData || typeof chartData !== "object") return;
     if (drillCols.length === 0) return;
-    const prev = drillLevel - 1;
+    const prev = Math.max(-1, drillLevel - 1);
     applyChartPatch({ __drillLevel: prev });
   }, [applyChartPatch, chartData, drillCols.length, drillLevel]);
+  useEffect(() => {
+    if (!chartId) return;
+    const unsub = chartBus.subscribe((evt) => {
+      if (evt?.action !== "click") return;
+      if (String(evt?.chartId ?? "").trim() !== chartId) return;
+      if (isDrillModeChart) return;
+      const field = String(clickField ?? "").trim();
+      if (!field) return;
+      const value = String(evt?.category ?? evt?.x ?? evt?.y ?? "").trim();
+      if (!value) return;
+      const current = crossSelection;
+      const isSame = Boolean(
+        current &&
+        String(current.sourceChartId ?? "").trim() === chartId &&
+        String(current.field ?? "").trim() === field &&
+        String(current.value ?? "").trim() === value
+      );
+      if (isSame) {
+        clearCrossSelection();
+        return;
+      }
+      setCrossSelection({
+        sourceChartId: chartId,
+        field,
+        value,
+        seriesName: String(evt?.series ?? "").trim() || undefined,
+      });
+    });
+    return () => unsub();
+  }, [chartBus, chartId, clickField, isDrillModeChart, crossSelection, setCrossSelection, clearCrossSelection]);
   const [apiLineData, setApiLineData] = useState<Array<{ ts: number; v: number }> | null>(null);
   const [apiBarCatData, setApiBarCatData] = useState<Array<{ category: string; value: number }> | null>(null);
   const [tableSort, setTableSort] = useState<{ key: 'name' | 'value' | 'trend'; dir: 'asc' | 'desc' }>({ key: 'value', dir: 'desc' });
   const [dbTableData, setDbTableData] = useState<{ columns: string[]; rows: unknown[][]; rowCount?: number } | null>(null);
   const [dbTableLoading, setDbTableLoading] = useState(false);
   const [dbTableError, setDbTableError] = useState<string | null>(null);
+  const dbTableHint = useMemo(() => readSoftQueryHint(dbTableError), [dbTableError]);
   const [semanticTableSort, setSemanticTableSort] = useState<{ column: number; dir: "asc" | "desc" } | null>(null);
 
   const exprEngineRolloutMode = useMemo(() => getExprEngineRolloutMode(), []);
@@ -179,6 +394,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
     if (chartData?.kind !== "db-table") return;
     const connectionId = String(chartData?.connectionId ?? "");
     const tableKey = String(chartData?.tableKey ?? "");
+    const effectiveDialect = resolveSqlDialect((chartData as any)?.connectionType);
     if (!connectionId || !tableKey) return;
 
     const explicitSemanticModelId = typeof (chartData as any)?.semanticModelId === "string" ? String((chartData as any).semanticModelId) : "";
@@ -201,7 +417,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
           const ctx = buildExprContextForPipelineStep({
             semanticModelV1,
             sourceModel,
-            dialect: "postgres",
+            dialect: effectiveDialect,
             mode: "legacy-calc-expr",
             steps: pipelineSteps.map((x: any) => ({ id: String(x?.id ?? ""), kind: String(x?.kind ?? ""), outputId: String(x?.outputId ?? "") })),
             stepId,
@@ -226,7 +442,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       const ctx = buildExprContextForPipelineStep({
         semanticModelV1,
         sourceModel,
-        dialect: "postgres",
+        dialect: effectiveDialect,
         mode: "legacy-calc-expr",
         steps: pipelineSteps.map((x: any) => ({ id: String(x?.id ?? ""), kind: String(x?.kind ?? ""), outputId: String(x?.outputId ?? "") })),
         stepId: params.stepId || String(params.computeId ?? ""),
@@ -234,7 +450,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       const analysisErrors = getEditorDiagnostics({ formula: params.uiFormula, ctx });
       const ast = parseUiFormulaToAst(params.uiFormula);
       const deps = resolveTypedDeps({ deps: extractDepsFromAst(ast as any), availableComputeIds: params.availableComputeIds });
-      const isSql = canCompileAstToSql(ast as any, "postgres") && (analysisErrors?.length ?? 0) === 0;
+      const isSql = canCompileAstToSql(ast as any, effectiveDialect) && (analysisErrors?.length ?? 0) === 0;
       return { deps, isSql };
     };
 
@@ -311,25 +527,11 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
     if (validationErr && (hasColumnsMeta || effectiveMapping)) {
       setDbTableData(null);
       setDbTableLoading(false);
-      setDbTableError(validationErr);
+      setDbTableError(toSoftQueryHint(validationErr));
       return;
     }
 
     let aborted = false;
-
-    const scopedDirectBiFilters = (() => {
-      const arr = Array.isArray(biFilters) ? biFilters : [];
-      return arr.filter((f: any) => {
-        const scope = (f?.scope === "report" || f?.scope === "page" || f?.scope === "visual") ? f.scope : "visual";
-        if (scope === "report") return true;
-        if (scope === "page") {
-          const fk = String(f?.pageKey ?? "").trim();
-          return !!effectivePageKey && fk === effectivePageKey;
-        }
-        const src = String(f?.sourceChartId ?? "").trim();
-        return !!chartId && src === String(chartId);
-      });
-    })();
 
     const load = async () => {
       setDbTableLoading(true);
@@ -343,12 +545,28 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
             start: dateRange?.start,
             end: dateRange?.end,
           });
+          const biWhere = buildDirectSqlWhereFromBiFilters(
+            scopedBiFiltersWithCross,
+            resolveSqlDialect((chartData as any)?.connectionType)
+          );
+          const timeWhere = (() => {
+            const xCol = String((effectiveMapping as any)?.xColumn ?? "").trim();
+            if (!xCol || !dateRange?.start || !dateRange?.end) return "";
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(xCol)) return "";
+            const from = dateRange.start instanceof Date ? dateRange.start.toISOString() : String(dateRange.start);
+            const to = dateRange.end instanceof Date ? dateRange.end.toISOString() : String(dateRange.end);
+            return `"${xCol}" BETWEEN ${renderSqlValue(from)} AND ${renderSqlValue(to)}`;
+          })();
+          const whereClause = [biWhere, timeWhere].filter(Boolean).join(" AND ");
+          const sqlWithScopedFilters = whereClause
+            ? `SELECT * FROM (${injectedSql}) __pa WHERE ${whereClause}`
+            : injectedSql;
           const sqlRes = await fetch("/api/query", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               connectionId,
-              sql: injectedSql,
+              sql: sqlWithScopedFilters,
               role: (() => {
                 if (role === "data-admin") return "admin";
                 if (role === "business") return "business";
@@ -434,11 +652,6 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
             columnsMeta: Array.isArray((chartData as any)?.columnsMeta) ? (chartData as any).columnsMeta : [],
             mapping: {
               ...(effectiveMapping as any),
-              filters: scopedDirectBiFilters.map((f: any) => ({
-                field: String(f?.field ?? ""),
-                operator: String(f?.op ?? "eq"),
-                values: Array.isArray(f?.values) ? f.values : [],
-              })),
             },
             vizType,
             pivotConfig,
@@ -451,12 +664,39 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
           semanticModelIdForRequest = "";
         }
 
-        const dbgGlobalContextBase = buildSemanticGlobalContext(biFilters, {
+        if (logicalQueryForRequest && typeof logicalQueryForRequest === "object") {
+          const requestQuery = {
+            ...(logicalQueryForRequest as any),
+            vizType,
+          };
+
+          const modelForClientValidation = (semanticModelForRequest && typeof semanticModelForRequest === "object")
+            ? semanticModelForRequest
+            : ((semanticArtifacts as any)?.semanticModelV1 && typeof (semanticArtifacts as any).semanticModelV1 === "object"
+              ? (semanticArtifacts as any).semanticModelV1
+              : null);
+          if (modelForClientValidation) {
+            const validated = validateLogicalQuery(requestQuery, modelForClientValidation);
+            if (!validated.ok) {
+              const firstError = String(validated.errors?.[0] ?? "").trim();
+              setDbTableData(null);
+              setDbTableLoading(false);
+              setDbTableError(toSoftQueryHint(firstError || "Query is incomplete. Please configure fields in Visualizations."));
+              return;
+            }
+          }
+        }
+
+        const dbgGlobalContextBase = buildSemanticGlobalContext(
+          transientCrossFilter ? [...biFilters, transientCrossFilter] : biFilters,
+          {
+          sourceModel: String((logicalQueryForRequest as any)?.sourceModel ?? "").trim() || undefined,
           dateRange: {
             start: dateRange?.start,
             end: dateRange?.end,
           },
-        });
+          }
+        );
         const dbgParams = (() => {
           const a = (semanticArtifacts && typeof semanticArtifacts === "object") ? semanticArtifacts : null;
           const selections = a && a.parameterSelections && typeof a.parameterSelections === "object" ? a.parameterSelections : null;
@@ -585,7 +825,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
             } else {
               try {
                 const ast = parseUiFormulaToAst(String((dm as any)?.uiFormula ?? sql));
-                return canCompileAstToSql(ast, "postgres");
+                return canCompileAstToSql(ast, effectiveDialect);
               } catch {
                 // If we cannot parse it, treat it as non-sql so that it doesn't poison injection.
                 return false;
@@ -726,6 +966,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
     chartId,
     effectivePageKey,
     biFilterVersion,
+    scopedBiFiltersWithCross,
     pivotConfig,
     String(chartData?.kind ?? ""),
     String(chartData?.connectionId ?? ""),
@@ -740,6 +981,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
     String(dateRange?.start instanceof Date ? dateRange.start.toISOString() : dateRange?.start ?? ""),
     String(dateRange?.end instanceof Date ? dateRange.end.toISOString() : dateRange?.end ?? ""),
     semanticArtifacts,
+    JSON.stringify(transientCrossFilter),
   ]);
 
   useEffect(() => {
@@ -880,9 +1122,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
     (async () => {
       try {
         const sp = new URLSearchParams();
-        if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
-        if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
-        for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+        appendLegacyFilterParams(sp);
         const r = await fetch(`/api/rest/analytics-trend?${sp.toString()}`, { cache: "no-store", signal: ctrl.signal });
         const rows = await r.json().catch(() => null);
         if (cancelled) return;
@@ -898,7 +1138,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       ctrl.abort();
       void queryKey;
     };
-  }, [chartName, chartData?.kind, dateRange?.start, dateRange?.end, propertyFilters]);
+  }, [chartName, chartData?.kind, dateRange?.start, dateRange?.end, propertyFilters, appendLegacyFilterParams, biFilterVersion, effectivePageKey, chartId]);
 
   // Fetch for Bar (categorical)
   useEffect(() => {
@@ -922,9 +1162,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
     (async () => {
       try {
         const sp = new URLSearchParams();
-        if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
-        if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
-        for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+        appendLegacyFilterParams(sp);
         const r = await fetch(`/api/rest/analytics-traffic?${sp.toString()}`, { cache: "no-store", signal: ctrl.signal });
         const rows = await r.json().catch(() => null);
         if (cancelled) return;
@@ -940,10 +1178,16 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       ctrl.abort();
       void queryKey;
     };
-  }, [chartName, dateRange?.start, dateRange?.end, propertyFilters]);
+  }, [chartName, dateRange?.start, dateRange?.end, propertyFilters, appendLegacyFilterParams, biFilterVersion, effectivePageKey, chartId]);
 
   // === DB data shortcuts (used by individual chart blocks below) ===
   const hasDbData = chartData?.kind === "db-table" && dbTableData && !dbTableLoading && !dbTableError && (dbTableData.columns?.length ?? 0) > 0;
+  const chartDataState: ChartDataState = useMemo(() => {
+    if (dbTableLoading) return "loading";
+    if (dbTableError) return "error";
+    if (hasDbData) return "data";
+    return "no_data";
+  }, [dbTableLoading, dbTableError, hasDbData]);
   const dbCols: string[] = dbTableData?.columns ?? [];
 
   // Apply cell overrides from edit mode (if any)
@@ -1048,9 +1292,30 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
   }, [configBg]);
 
   const renderDbNoRows = () => {
+    const isError = chartDataState === "error";
+    const errorHint = isError ? readSoftQueryHint(dbTableError) : null;
+    const errorMessage = isError
+      ? (String((errorHint || dbTableError || "Query error")).trim() || "Query error")
+      : "";
+    const message =
+      isError
+        ? errorMessage
+        : chartDataState === "loading"
+          ? "Loading data..."
+          : "No data";
     return (
       <div className="w-full h-full flex items-center justify-center bg-slate-950">
-        <div className="text-sm text-slate-400">No rows</div>
+        <div className="max-w-[90%] text-center">
+          <div className={`text-sm ${isError ? "text-rose-300" : "text-slate-400"}`}>{message}</div>
+          {isError && dbTableError && !errorHint && (
+            <details className="mt-2 text-left">
+              <summary className="cursor-pointer text-xs text-slate-500">Error details</summary>
+              <pre className="mt-2 max-h-28 overflow-auto rounded border border-rose-500/30 bg-black/30 p-2 text-[11px] text-rose-200 whitespace-pre-wrap break-words">
+                {String(dbTableError)}
+              </pre>
+            </details>
+          )}
+        </div>
       </div>
     );
   };
@@ -1152,7 +1417,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       return (
         <div className="w-full h-full flex items-center justify-center bg-slate-950">
           {dbTableLoading && <div className="text-sm text-slate-400">Loading data...</div>}
-          {dbTableError && <div className="text-sm text-rose-300">{dbTableError}</div>}
+          {dbTableError && <div className={`text-sm ${dbTableHint ? "text-slate-400" : "text-rose-300"}`}>{dbTableHint ?? dbTableError}</div>}
         </div>
       );
     }
@@ -1165,8 +1430,12 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       );
     }
 
-    const title = String(chartName ?? "").trim() || String(dbCols?.[0] ?? "").trim() || "KPI";
-    const rawVal = (dbRows?.[0] as any[])?.[0];
+    const mappedMeasureRef = String((mapping as any)?.yColumns?.[0]?.col ?? (chartData as any)?.logicalQuery?.measures?.[0] ?? "").trim();
+    const mappedMeasure = mappedMeasureRef.includes(".") ? mappedMeasureRef.split(".").slice(1).join(".") : mappedMeasureRef;
+    const measureIdx = mappedMeasure ? dbCols.findIndex((c) => String(c).trim() === mappedMeasure) : -1;
+    const valueIdx = measureIdx >= 0 ? measureIdx : 0;
+    const title = String(chartName ?? "").trim() || String(dbCols?.[valueIdx] ?? "").trim() || "KPI";
+    const rawVal = (dbRows?.[0] as any[])?.[valueIdx];
     const numVal = rawVal == null ? null : Number(rawVal);
     const display = (numVal != null && Number.isFinite(numVal))
       ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(numVal)
@@ -1221,7 +1490,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       return (
         <div className="w-full h-full flex items-center justify-center bg-slate-950">
           {dbTableLoading && <div className="text-sm text-slate-400">Loading data...</div>}
-          {dbTableError && <div className="text-sm text-rose-300">{dbTableError}</div>}
+          {dbTableError && <div className={`text-sm ${dbTableHint ? "text-slate-400" : "text-rose-300"}`}>{dbTableHint ?? dbTableError}</div>}
         </div>
       );
     }
@@ -1269,13 +1538,43 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
             </TableRow>
           }
           renderRow={(row, rowIdx) => {
+            const cf = ((mapping as any)?.conditionalFormatting && typeof (mapping as any).conditionalFormatting === "object")
+              ? (mapping as any).conditionalFormatting
+              : null;
+            const cfFieldRaw = String(cf?.field ?? "").trim();
+            const cfField = cfFieldRaw.includes(".") ? cfFieldRaw.split(".").slice(-1)[0] : cfFieldRaw;
+            const cfColIdx = cfField ? dbCols.indexOf(cfField) : -1;
+            const cfValueRaw = Number(cf?.value);
+            const cfValue = Number.isFinite(cfValueRaw) ? cfValueRaw : NaN;
+            const cfOp = String(cf?.op ?? "gte").toLowerCase();
+            const cfColor = String(cf?.color ?? "#065f46").trim() || "#065f46";
+
             return (
               <TableRow className={rowIdx % 2 === 0 ? "bg-white/0" : "bg-white/5"}>
-                {dbCols.map((_, cIdx) => (
-                  <TableCell key={cIdx} className="border-b border-white/5 px-2 py-1 text-slate-100 whitespace-nowrap">
-                    {formatCellValue((row as any[])?.[cIdx], dbColTypes[cIdx] ?? "unknown")}
-                  </TableCell>
-                ))}
+                {dbCols.map((_, cIdx) => {
+                  const cellRaw = (row as any[])?.[cIdx];
+                  const isCfCol = cfColIdx >= 0 && cIdx === cfColIdx;
+                  let applyCf = false;
+                  if (isCfCol && Number.isFinite(cfValue)) {
+                    const n = Number(cellRaw);
+                    if (Number.isFinite(n)) {
+                      if (cfOp === "gt") applyCf = n > cfValue;
+                      else if (cfOp === "gte") applyCf = n >= cfValue;
+                      else if (cfOp === "lt") applyCf = n < cfValue;
+                      else if (cfOp === "lte") applyCf = n <= cfValue;
+                      else if (cfOp === "eq") applyCf = n === cfValue;
+                    }
+                  }
+                  return (
+                    <TableCell
+                      key={cIdx}
+                      className="border-b border-white/5 px-2 py-1 text-slate-100 whitespace-nowrap"
+                      style={applyCf ? ({ backgroundColor: cfColor } as any) : undefined}
+                    >
+                      {formatCellValue(cellRaw, dbColTypes[cIdx] ?? "unknown")}
+                    </TableCell>
+                  );
+                })}
               </TableRow>
             );
           }}
@@ -1289,7 +1588,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       return (
         <div className="w-full h-full flex items-center justify-center bg-slate-950">
           {dbTableLoading && <div className="text-sm text-slate-400">Loading data...</div>}
-          {dbTableError && <div className="text-sm text-rose-300">{dbTableError}</div>}
+          {dbTableError && <div className={`text-sm ${dbTableHint ? "text-slate-400" : "text-rose-300"}`}>{dbTableHint ?? dbTableError}</div>}
         </div>
       );
     }
@@ -1364,6 +1663,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
           <div className="min-h-full flex items-center justify-center p-4">
             <div className="w-full max-w-[560px]">
               <ColumnMappingPanel
+                key={String(chartId ?? "")}
                 chartName={chartName}
                 columns={mappingColumns}
                 initialMapping={mapping}
@@ -1397,6 +1697,16 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
   }
 
   if (chartData?.kind === "db-table" && effectiveVizType === "donut") {
+    const built = renderDbUniversalFallback();
+    if (built) return built;
+    return renderDbNoRows();
+  }
+
+  if (
+    chartData?.kind === "db-table"
+    && !showMapping
+    && (effectiveVizType === "line" || effectiveVizType === "bar" || effectiveVizType === "area" || effectiveVizType === "pie" || effectiveVizType === "scatter" || effectiveVizType === "histogram")
+  ) {
     const built = renderDbUniversalFallback();
     if (built) return built;
     return renderDbNoRows();
@@ -1493,7 +1803,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Power BI: Combo charts (dual axis)
   if (lc === "line and clustered column chart" || lc === "line and stacked column chart") {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     if (chartData?.kind === "db-table" && !dbXY) {
       return renderDbTableFallback();
     }
@@ -1568,13 +1878,13 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
     renderedChart = (
       <div className="w-full h-full flex items-center justify-center bg-slate-950">
         {dbTableLoading && <div className="text-sm text-slate-400">Loading data...</div>}
-        {dbTableError && <div className="text-sm text-rose-300">{dbTableError}</div>}
+        {dbTableError && <div className={`text-sm ${dbTableHint ? "text-slate-400" : "text-rose-300"}`}>{dbTableHint ?? dbTableError}</div>}
       </div>
     );
   }
   // Generic: Line (time series) / Power BI: Line chart
   else if (chartName.includes("Line (time series)") || lc === "line chart") {
-    const dbTs = hasDbData ? toTimeSeries(dbCols, dbRows) : null;
+    const dbTs = hasDbData ? toTimeSeries(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     const strokes = ["#10b981", "#3b82f6", "#f59e0b", "#ef4444", "#8b5cf6"];
     if (dbTs) {
       renderedChart = (
@@ -1619,7 +1929,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Power BI: Clustered column chart
   else if (lc === "clustered column chart") {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
     const seriesData = dbXY
       ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } }))
@@ -1644,7 +1954,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Power BI: Clustered bar chart (horizontal)
   else if (lc === "clustered bar chart") {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
     const seriesData = dbXY
       ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } }))
@@ -1669,7 +1979,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Grouped bar (legacy)
   else if (chartName.includes("Grouped bar")) {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
     const seriesData = dbXY
       ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 22, itemStyle: { borderRadius: [6,6,0,0] as any } }))
@@ -1709,9 +2019,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
               if (chartData?.kind === "db-table") return;
 
               const sp = new URLSearchParams();
-              if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
-              if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
-              for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+              appendLegacyFilterParams(sp);
               fetch(`/api/rest/analytics-traffic?${sp.toString()}`, { cache: 'no-store' })
                 .then(r => r.json())
                 .then((rows: any[]) => {
@@ -1737,7 +2045,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Power BI: Stacked column chart (vertical)
   else if (lc === "stacked column chart") {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
     const seriesData = dbXY
       ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, stack: 'total', data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } }))
@@ -1763,7 +2071,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Power BI: Stacked bar chart (horizontal)
   else if (lc === "stacked bar chart") {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
     const seriesData = dbXY
       ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, stack: 'total', data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } }))
@@ -1789,7 +2097,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Stacked bar (legacy)
   else if (chartName.includes("Stacked bar")) {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     const cats = dbXY ? dbXY.xLabels : ["A", "B", "C", "D"];
     const seriesData = dbXY
       ? dbXY.series.map(s => ({ name: s.name, type: 'bar' as const, stack: 'total', data: s.data, yAxisIndex: (hasY2 && y2Set.has(String(s.name))) ? 1 : 0, barMaxWidth: 26, itemStyle: { borderRadius: [6,6,0,0] as any } }))
@@ -1829,9 +2137,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
               if (chartData?.kind === "db-table") return;
 
               const sp = new URLSearchParams();
-              if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
-              if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
-              for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+              appendLegacyFilterParams(sp);
               fetch(`/api/rest/analytics-traffic?${sp.toString()}`, { cache: 'no-store' })
                 .then(r => r.json())
                 .then((rows: any[]) => {
@@ -1857,7 +2163,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Generic: Area / Power BI: Area chart
   else if ((chartName.includes("Area") && chartName.includes("накоп")) || lc === "area chart") {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     if (chartData?.kind === "db-table" && !dbXY) {
       return renderDbTableFallback();
     }
@@ -1884,9 +2190,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
             try {
               if (chartData?.kind === "db-table") return;
               const sp = new URLSearchParams();
-              if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
-              if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
-              for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+              appendLegacyFilterParams(sp);
               fetch(`/api/rest/analytics-trend?${sp.toString()}`, { cache: 'no-store' })
                 .then(r => r.json())
                 .then((rows: any[]) => {
@@ -1908,7 +2212,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
 
   // Generic: Stacked area / Power BI: Stacked area chart
   else if (chartName.includes("Stacked area") || lc === "stacked area chart") {
-    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows) : null;
+    const dbXY = hasDbData ? toEChartsXY(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     if (chartData?.kind === "db-table" && !dbXY) {
       return renderDbTableFallback();
     }
@@ -1939,9 +2243,7 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
             try {
               if (chartData?.kind === "db-table") return;
               const sp = new URLSearchParams();
-              if (dateRange?.start) sp.set("startDate", dateRange.start.toISOString());
-              if (dateRange?.end) sp.set("endDate", dateRange.end.toISOString());
-              for (const f of propertyFilters) sp.set(`prop_${f.key}`, `${f.operator}:${f.value}`);
+              appendLegacyFilterParams(sp);
               fetch(`/api/rest/analytics-trend?${sp.toString()}`, { cache: 'no-store' })
                 .then(r => r.json())
                 .then((rows: any[]) => {
@@ -1966,8 +2268,8 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
   }
 
   // Donut Chart (unified ECharts)
-  if (chartData?.kind !== "db-table" && (chartName.includes("Donut") || chartName.includes("Traffic"))) {
-    const dbPie = hasDbData ? toPieData(dbCols, dbRows) : null;
+  if (chartData?.kind !== "db-table" && chartData?.kind !== "slicer" && (chartName.includes("Donut") || chartName.includes("Traffic"))) {
+    const dbPie = hasDbData ? toPieData(dbCols, dbRows, undefined, undefined, mapping as any) : null;
     if (chartData?.kind === "db-table" && !dbPie) {
       return (
         <div className="w-full h-full flex items-center justify-center bg-slate-950">
@@ -2104,7 +2406,9 @@ export const ChartPreview = memo(function ChartPreview({ chartName, chartType, w
       if (dbTableError) {
         return (
           <div className="w-full h-full flex items-center justify-center bg-slate-950">
-            <div className="text-sm text-red-300">{String((dbTableError as any)?.message ?? dbTableError ?? "DB query failed")}</div>
+            <div className={`text-sm ${dbTableHint ? "text-slate-400" : "text-red-300"}`}>
+              {dbTableHint ?? String((dbTableError as any)?.message ?? dbTableError ?? "DB query failed")}
+            </div>
           </div>
         );
       }

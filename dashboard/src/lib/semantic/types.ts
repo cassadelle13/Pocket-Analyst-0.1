@@ -96,6 +96,7 @@ export type SemanticModelV1 = {
         param: string;
       }>;
       joins?: Record<string, SemanticJoinV1>;
+      aliases?: Record<string, string>;
     }
   >;
 };
@@ -131,8 +132,13 @@ export type LogicalFilter = {
     | "endswith"
     | "iendswith"
     | "isnull"
-    | "isnotnull";
+    | "isnotnull"
+    | "top_n";
   values: any[];
+  logicGroup?: string;
+  logicOp?: "and" | "or";
+  fieldAlias?: string;
+  topN?: { mode: "top" | "bottom"; n: number; byMeasure: string };
 };
 
 export type LogicalTime = {
@@ -153,6 +159,7 @@ export type LogicalQuery = {
   dimensions?: string[];
   measures?: string[];
   measuresV2?: MeasureRef[];
+  clientClassified?: boolean;
   measureAggOverrides?: Record<string, AggFn>;
   time?: LogicalTime;
   filters?: LogicalFilter[];
@@ -161,6 +168,7 @@ export type LogicalQuery = {
   orderBy?: Array<{ field: string; dir: "asc" | "desc" }>;
   limit?: number;
   offset?: number;
+  vizType?: string;
 };
 
 export type GlobalFilterContextV1 = {
@@ -169,6 +177,9 @@ export type GlobalFilterContextV1 = {
     field: string;
     op: LogicalFilter["op"];
     values: any[];
+    logicGroup?: string;
+    logicOp?: "and" | "or";
+    fieldAlias?: string;
     scope?: "report" | "page" | "visual";
     sourceChartId?: string;
     pageKey?: string;

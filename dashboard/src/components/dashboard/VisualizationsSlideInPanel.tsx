@@ -6,8 +6,12 @@ import { useSearchParams } from "next/navigation";
 import Editor from "@monaco-editor/react";
 import { buildExprContextForPipelineStep, createPipelineExprSessionForStep, getEditorDiagnostics, getExpressionCompletionsAt, getExpressionHover } from "../../lib/semantic/expressionEngine";
 import { classifyFieldRef, uiAggToAggFn } from "../../lib/semantic/fieldClassifier";
+import { wellsToLogicalQuery } from "../../lib/semantic/wellsToLogicalQuery";
 import { useSemanticModel } from "../../context/SemanticModelContext";
 import { useGlobalFilters } from "../../store/globalFiltersContext";
+import { FieldWellsPanel } from "./FieldWellsPanel";
+import { FormatPanel } from "./FormatPanel";
+import { VizTypePicker } from "./VizTypePicker";
 import type { VizType } from "@/types/viz";
 
 type PipelineStepBaseV1 = {
@@ -512,32 +516,32 @@ type SlotSchema = {
 
 const VIZ_SLOTS: Record<VizType, SlotSchema[]> = {
   line: [
-    { key: "axis", label: "Axis (X)", min: 0, max: 1, accepts: ["dimension", "time"] },
-    { key: "values", label: "Axis (Y)", min: 0, max: 99, accepts: ["dimension", "measure"] },
-    { key: "legend", label: "Legend (group by)", min: 0, max: 1, accepts: ["dimension"] },
-    { key: "tooltips", label: "Tooltip", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+    { key: "axis", label: "X Axis", min: 0, max: 1, accepts: ["dimension", "time"] },
+    { key: "values", label: "Values", min: 0, max: 99, accepts: ["dimension", "measure"] },
+    { key: "legend", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
   area: [
-    { key: "axis", label: "Axis (X)", min: 0, max: 1, accepts: ["dimension", "time"] },
-    { key: "values", label: "Axis (Y)", min: 0, max: 99, accepts: ["dimension", "measure"] },
-    { key: "legend", label: "Legend (group by)", min: 0, max: 1, accepts: ["dimension"] },
-    { key: "tooltips", label: "Tooltip", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+    { key: "axis", label: "X Axis", min: 0, max: 1, accepts: ["dimension", "time"] },
+    { key: "values", label: "Values", min: 0, max: 99, accepts: ["dimension", "measure"] },
+    { key: "legend", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
   bar: [
-    { key: "axis", label: "Axis (X)", min: 0, max: 1, accepts: ["dimension", "time"] },
-    { key: "values", label: "Axis (Y)", min: 0, max: 99, accepts: ["dimension", "measure"] },
-    { key: "legend", label: "Legend (group by)", min: 0, max: 1, accepts: ["dimension"] },
-    { key: "tooltips", label: "Tooltip", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+    { key: "axis", label: "X Axis", min: 0, max: 1, accepts: ["dimension", "time"] },
+    { key: "values", label: "Values", min: 0, max: 99, accepts: ["dimension", "measure"] },
+    { key: "legend", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
   scatter: [
-    { key: "axis", label: "X", min: 0, max: 1, accepts: ["dimension", "measure"] },
-    { key: "values", label: "Y", min: 0, max: 99, accepts: ["dimension", "measure"] },
-    { key: "legend", label: "Legend (group by)", min: 0, max: 1, accepts: ["dimension"] },
-    { key: "tooltips", label: "Tooltip", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+    { key: "axis", label: "X Axis", min: 0, max: 1, accepts: ["dimension", "measure"] },
+    { key: "values", label: "Y Axis", min: 0, max: 99, accepts: ["dimension", "measure"] },
+    { key: "legend", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
   histogram: [
     { key: "axis", label: "Values", min: 0, max: 1, accepts: ["dimension", "measure"] },
-    { key: "tooltips", label: "Tooltip", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
   table: [
     { key: "columns", label: "Columns", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
@@ -548,21 +552,52 @@ const VIZ_SLOTS: Record<VizType, SlotSchema[]> = {
     { key: "values", label: "Values", min: 0, max: 1, accepts: ["measure", "dimension"] },
   ],
   pie: [
-    { key: "category", label: "Category", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "category", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
     { key: "values", label: "Values", min: 0, max: 1, accepts: ["dimension", "measure"] },
-    { key: "tooltips", label: "Tooltip", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
   donut: [
-    { key: "category", label: "Category", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "category", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
     { key: "values", label: "Values", min: 0, max: 1, accepts: ["dimension", "measure"] },
-    { key: "tooltips", label: "Tooltip", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
   kpi: [
     { key: "values", label: "Value", min: 1, max: 1, accepts: ["dimension", "measure"] },
-    { key: "tooltips", label: "Tooltip", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
   slicer: [
     { key: "axis", label: "Field", min: 1, max: 1, accepts: ["dimension", "time"] },
+  ],
+  /** Placeholder slot schemas for types without full build UI in this panel */
+  column: [
+    { key: "axis", label: "X Axis", min: 0, max: 1, accepts: ["dimension", "time"] },
+    { key: "values", label: "Values", min: 0, max: 99, accepts: ["dimension", "measure"] },
+    { key: "legend", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+  ],
+  funnel: [
+    { key: "axis", label: "Stage", min: 0, max: 1, accepts: ["dimension", "time"] },
+    { key: "values", label: "Values", min: 0, max: 99, accepts: ["measure", "dimension"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+  ],
+  waterfall: [
+    { key: "axis", label: "X Axis", min: 0, max: 1, accepts: ["dimension", "time"] },
+    { key: "values", label: "Values", min: 0, max: 99, accepts: ["measure", "dimension"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+  ],
+  treemap: [
+    { key: "category", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "values", label: "Values", min: 0, max: 1, accepts: ["dimension", "measure"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+  ],
+  cohort: [
+    { key: "columns", label: "Columns", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
+  ],
+  auto: [
+    { key: "axis", label: "X Axis", min: 0, max: 1, accepts: ["dimension", "time"] },
+    { key: "values", label: "Values", min: 0, max: 99, accepts: ["dimension", "measure"] },
+    { key: "legend", label: "Legend", min: 0, max: 1, accepts: ["dimension"] },
+    { key: "tooltips", label: "Tooltips", min: 0, max: 99, accepts: ["dimension", "measure", "time"] },
   ],
 };
 
@@ -623,49 +658,53 @@ function BuildMultiDropZone({
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`rounded-2xl border p-3 transition ${
+      className={`rounded-md border px-2 py-1.5 transition ${
         isDragOver
-          ? "border-emerald-400/30 bg-emerald-500/10"
+          ? "border-emerald-400/40 bg-emerald-500/10"
           : "border-white/10 bg-white/[0.03]"
       }`}
     >
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">{label}</div>
-        {hasValues && (
-          <button
-            type="button"
-            onClick={onClear}
-            className="p-1 rounded-lg hover:bg-white/10 transition"
-            title="Clear"
-          >
-            <Plus className="w-4 h-4" style={{ transform: "rotate(45deg)" }} />
-          </button>
-        )}
+      <div className="flex items-center justify-between gap-1.5 min-h-[22px]">
+        <div className="text-[11px] font-medium text-slate-300 truncate">{label}</div>
+        <div className="flex items-center gap-0.5 shrink-0">
+          {hasValues ? (
+            <button
+              type="button"
+              onClick={onClear}
+              className="p-0.5 rounded hover:bg-white/10 text-slate-400 hover:text-slate-200 transition text-[10px] leading-none"
+              title="Clear all"
+            >
+              ×
+            </button>
+          ) : null}
+        </div>
       </div>
 
-      <div className="mt-2">
+      <div className="mt-1 min-h-[24px]">
         {hasValues ? (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-1">
             {values.map((v, idx) => (
               <div
                 key={`${label}_${idx}_${v}`}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-white/10 bg-white/5 text-[11px] font-semibold text-white"
+                className="inline-flex items-center gap-1 pl-1.5 pr-0.5 py-0.5 rounded border border-white/15 bg-white/[0.06] text-[10px] font-medium text-slate-100 max-w-full"
                 title={v}
               >
-                <span className="max-w-[180px] truncate">{v}</span>
+                <span className="max-w-[160px] truncate">{v}</span>
                 <button
                   type="button"
                   onClick={() => onRemove(idx)}
-                  className="p-0.5 rounded-lg hover:bg-white/10 transition"
+                  className="p-0.5 rounded hover:bg-white/15 text-slate-400 hover:text-white transition leading-none"
                   title="Remove"
                 >
-                  <Plus className="w-3.5 h-3.5" style={{ transform: "rotate(45deg)" }} />
+                  ×
                 </button>
               </div>
             ))}
           </div>
         ) : (
-          <div className="text-slate-500 text-xs py-2">{isDragOver ? "Drop here" : "Drag fields here"}</div>
+          <div className={`text-[11px] italic ${isDragOver ? "text-emerald-200/90" : "text-slate-500"}`}>
+            {isDragOver ? "Drop here" : "Add data fields here"}
+          </div>
         )}
       </div>
     </div>
@@ -677,14 +716,16 @@ function BuildDropZone({
   value,
   onDrop,
   onClear,
-  compact,
+  compact: _compact,
 }: {
   label: string;
   value: string;
   onDrop: (field: DragFieldInfo) => void;
   onClear: () => void;
+  /** @deprecated Layout is always compact (Power BI-style well) */
   compact?: boolean;
 }) {
+  void _compact;
   const [isDragOver, setIsDragOver] = useState(false);
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -714,37 +755,34 @@ function BuildDropZone({
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`rounded-2xl border p-3 transition ${
+      className={`rounded-md border px-2 py-1.5 transition ${
         isDragOver
-          ? "border-emerald-400/30 bg-emerald-500/10"
+          ? "border-emerald-400/40 bg-emerald-500/10"
           : "border-white/10 bg-white/[0.03]"
       }`}
     >
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">{label}</div>
+      <div className="flex items-center justify-between gap-1.5 min-h-[22px]">
+        <div className="text-[11px] font-medium text-slate-300 truncate">{label}</div>
         {!!value && (
           <button
             type="button"
-            onClick={() => {
-              if (!window.confirm("Clear this field shelf?")) return;
-              onClear();
-            }}
-            className="p-1 rounded-lg hover:bg-white/10 transition"
+            onClick={() => onClear()}
+            className="p-0.5 rounded hover:bg-white/10 text-slate-400 hover:text-slate-200 transition text-[10px] leading-none shrink-0"
             title="Clear"
           >
-            <Plus className="w-4 h-4" style={{ transform: "rotate(45deg)" }} />
+            ×
           </button>
         )}
       </div>
 
-      <div className={compact ? "mt-1" : "mt-2"}>
+      <div className="mt-1 min-h-[24px]">
         {value ? (
-          <div className="px-3 py-2 rounded-xl border border-white/10 bg-white/5 text-xs font-semibold text-white truncate">
-            {value}
+          <div className="inline-flex items-center gap-1 max-w-full pl-1.5 pr-1 py-0.5 rounded border border-white/15 bg-white/[0.06] text-[10px] font-medium text-slate-100">
+            <span className="truncate">{value}</span>
           </div>
         ) : (
-          <div className={`text-slate-500 ${compact ? "text-[11px] py-1" : "text-xs py-2"}`}>
-            {isDragOver ? "Drop here" : "Drag field here"}
+          <div className={`text-[11px] italic ${isDragOver ? "text-emerald-200/90" : "text-slate-500"}`}>
+            {isDragOver ? "Drop here" : "Add data fields here"}
           </div>
         )}
       </div>
@@ -879,8 +917,9 @@ export function VisualizationsSlideInPanel({
   }, []);
 
   const canEdit = Boolean(activeChartId);
-  const [activeTab, setActiveTab] = useState<"build" | "format" | "filters">("build");
+  const [activeTab] = useState<"build" | "format" | "filters" | "formulas">("build");
   const [dropRejectHint, setDropRejectHint] = useState("");
+  const [isDirectSqlCollapsed, setIsDirectSqlCollapsed] = useState(false);
   const rejectHintTimerRef = useRef<number | null>(null);
   const isDbTableDirectSqlChart = String((activeChartData as any)?.kind ?? "").trim() === "db-table";
   const directSql = String((activeChartData as any)?.customSql ?? "");
@@ -897,27 +936,6 @@ export function VisualizationsSlideInPanel({
         },
       })
     );
-  };
-
-  const forceRunDirectSql = () => {
-    if (!activeChartId) return;
-    window.dispatchEvent(
-      new CustomEvent("dashboard:update-chart-data", {
-        detail: {
-          chartId: activeChartId,
-          patch: {
-            __sqlRunNonce: Date.now(),
-          },
-        },
-      })
-    );
-  };
-
-  const insertDirectSqlToken = (token: string) => {
-    const base = String((activeChartData as any)?.customSql ?? "");
-    const t = String(token ?? "").trim();
-    if (!t) return;
-    patchDirectSql(`${base}${base && !base.endsWith("\n") ? "\n" : ""}${t}`);
   };
 
   const mapping = useMemo(() => {
@@ -955,6 +973,7 @@ export function VisualizationsSlideInPanel({
     return (
       v === "line"
       || v === "bar"
+      || v === "column"
       || v === "table"
       || v === "pivot"
       || v === "pie"
@@ -964,6 +983,13 @@ export function VisualizationsSlideInPanel({
       || v === "scatter"
       || v === "histogram"
       || v === "slicer"
+      || v === "funnel"
+      || v === "treemap"
+      || v === "waterfall"
+      || v === "cohort"
+      || v === "heatmap"
+      || v === "sankey"
+      || v === "bubble"
     )
       ? (v as VizType)
       : "line";
@@ -973,106 +999,27 @@ export function VisualizationsSlideInPanel({
     if (!activeChartId) return;
     const prev = (mapping && typeof mapping === "object") ? mapping : {};
     const next = { ...prev, ...patch };
-    window.dispatchEvent(
-      new CustomEvent("dashboard:update-chart-data", {
-        detail: { chartId: activeChartId, patch: { columnMapping: next } },
-      })
-    );
-  };
-
-  const patchLogicalQueryForTableColumns = (nextDetailsColumns: string[], force = false) => {
-    if (!activeChartId) return;
-    if (!force && vizType !== "table") return;
-    const src = String((activeChartData as any)?.logicalQuery?.sourceModel ?? "").trim();
-    const modelObj = (semanticModelV1 && typeof semanticModelV1 === "object")
-      ? (semanticModelV1 as any)?.models?.[src]
-      : null;
-    if (!src || !modelObj || typeof modelObj !== "object") return;
-
-    const dimsObj = modelObj?.dimensions && typeof modelObj.dimensions === "object" ? modelObj.dimensions : {};
-    const measObj = modelObj?.measures && typeof modelObj.measures === "object" ? modelObj.measures : {};
-    const dimNames = Object.keys(dimsObj);
-    const measNames = Object.keys(measObj);
-
-    const toRef = (raw: string): string => {
-      const s = String(raw ?? "").trim();
-      if (!s) return "";
-      if (s.includes(".")) return s;
-      const dimHit = dimNames.find((k) => k.toLowerCase() === s.toLowerCase());
-      if (dimHit) return `${src}.${dimHit}`;
-      const measHit = measNames.find((k) => k.toLowerCase() === s.toLowerCase());
-      if (measHit) return `${src}.${measHit}`;
-      return "";
-    };
-
-    const refs = nextDetailsColumns.map(toRef).filter(Boolean);
-    const dims: string[] = [];
-    const meas: string[] = [];
-    for (const r of refs) {
-      const ref = String(r ?? "").trim();
-      if (!ref.includes(".")) continue;
-      const field = ref.split(".").slice(1).join(".");
-      if (Object.prototype.hasOwnProperty.call(measObj, field)) {
-        meas.push(ref);
-      } else if (Object.prototype.hasOwnProperty.call(dimsObj, field)) {
-        dims.push(ref);
-      }
-    }
-
-    const nextDims = Array.from(new Set(dims));
-    const nextMeas = Array.from(new Set(meas));
-    const yLike = [
-      ...(Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : []),
-      ...(Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : []),
-    ];
-    const measureAggOverrides = (() => {
-      const out: Record<string, "sum" | "avg" | "count" | "countDistinct" | "min" | "max"> = {};
-      for (const y of yLike) {
-        const col = String((y as any)?.col ?? "").trim();
-        if (!col) continue;
-        const ref = toRef(col);
-        if (!ref) continue;
-        const agg = uiAggToAggFn((y as any)?.agg);
-        if (!agg) continue;
-        out[ref] = agg;
-      }
-      return out;
-    })();
-    const measuresV2 = nextMeas.map((ref) => {
-      const field = String(ref ?? "").split(".").slice(1).join(".");
-      const aggFn = measureAggOverrides[ref] ?? (field ? measureAggOverrides[field] : undefined);
-      return aggFn ? { ref, aggFn } : { ref };
+    const sourceModel = String((activeChartData as any)?.logicalQuery?.sourceModel ?? "").trim();
+    const nextLogicalQuery = wellsToLogicalQuery({
+      vizType,
+      mapping: next,
+      sourceModel,
+      semanticModel: semanticModelV1 as any,
+      prevLogicalQuery: ((activeChartData as any)?.logicalQuery && typeof (activeChartData as any).logicalQuery === "object")
+        ? (activeChartData as any).logicalQuery
+        : undefined,
     });
-    const prevLq = ((activeChartData as any)?.logicalQuery && typeof (activeChartData as any).logicalQuery === "object")
-      ? (activeChartData as any).logicalQuery
-      : {};
-
     window.dispatchEvent(
       new CustomEvent("dashboard:update-chart-data", {
         detail: {
           chartId: activeChartId,
           patch: {
-            logicalQuery: {
-              ...prevLq,
-              sourceModel: src,
-              dimensions: nextDims,
-              measures: nextMeas,
-              ...(measuresV2.length > 0 ? { measuresV2 } : {}),
-              ...(Object.keys(measureAggOverrides).length > 0 ? { measureAggOverrides } : {}),
-              noFallbackMeasure: true,
-              filterNullDimensions: true,
-              limit: Number.isFinite(Number((prevLq as any)?.limit)) ? Number((prevLq as any).limit) : 500,
-            },
+            columnMapping: next,
+            logicalQuery: nextLogicalQuery ?? null,
           },
         },
       })
     );
-  };
-
-  const patchLogicalQueryForTableColumnsAs = (nextVizType: VizType, nextDetailsColumns: string[]) => {
-    if (!activeChartId) return;
-    if (nextVizType !== "table") return;
-    patchLogicalQueryForTableColumns(nextDetailsColumns, true);
   };
 
   const setVizType = (v: VizType) => {
@@ -1106,6 +1053,9 @@ export function VisualizationsSlideInPanel({
 
     if (v === "slicer") {
       // Slicer uses chartData.kind = 'slicer' and chartData.slicer.fieldRef; mapping is irrelevant.
+      const currentSlicer = (
+        (activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object"
+      ) ? (activeChartData as any).slicer : {};
       window.dispatchEvent(
         new CustomEvent("dashboard:update-chart-data", {
           detail: {
@@ -1113,9 +1063,10 @@ export function VisualizationsSlideInPanel({
             patch: {
               kind: "slicer",
               slicer: {
+                ...currentSlicer,
                 fieldRef: String((activeChartData as any)?.slicer?.fieldRef ?? "").trim(),
                 mode: String((activeChartData as any)?.slicer?.mode ?? "list").trim() || "list",
-                multiSelect: true,
+                multiSelect: Boolean((activeChartData as any)?.slicer?.multiSelect !== false),
                 selectedValues: Array.isArray((activeChartData as any)?.slicer?.selectedValues)
                   ? (activeChartData as any).slicer.selectedValues
                   : [],
@@ -1179,16 +1130,29 @@ export function VisualizationsSlideInPanel({
           }));
         }
       }
-      patchLogicalQueryForTableColumnsAs("table", uniqStrings(nextMapping.detailsColumns));
     }
+
+    const sourceModel = String((activeChartData as any)?.logicalQuery?.sourceModel ?? "").trim();
+    const nextLogicalQuery = wellsToLogicalQuery({
+      vizType: v,
+      mapping: nextMapping,
+      sourceModel,
+      semanticModel: semanticModelV1 as any,
+      prevLogicalQuery: ((activeChartData as any)?.logicalQuery && typeof (activeChartData as any).logicalQuery === "object")
+        ? (activeChartData as any).logicalQuery
+        : undefined,
+    });
 
     window.dispatchEvent(
       new CustomEvent("dashboard:update-chart-data", {
         detail: {
           chartId: activeChartId,
           patch: {
+            ...(activeChartData?.kind ? {} : { kind: "db-table" }),
+            name: v === "table" ? "Table" : v === "line" ? "Line" : v === "bar" ? "Bar" : v === "area" ? "Area" : v,
             chartConfig: nextCfg,
             columnMapping: nextMapping,
+            logicalQuery: nextLogicalQuery ?? null,
             __vizMappings: nextStore,
           },
         },
@@ -1197,32 +1161,19 @@ export function VisualizationsSlideInPanel({
   };
 
   const clearMappingKey = (key: "xColumn" | "groupBy") => {
-    if (!activeChartId) return;
     const prev = (mapping && typeof mapping === "object") ? mapping : {};
     const next = { ...prev } as any;
     delete next[key];
-    window.dispatchEvent(
-      new CustomEvent("dashboard:update-chart-data", {
-        detail: { chartId: activeChartId, patch: { columnMapping: next } },
-      })
-    );
+    patchMapping(next);
   };
 
   const clearMappingArrayKey = (
     key: "tooltipColumns" | "detailsColumns" | "drilldownColumns" | "details2Columns"
   ) => {
-    if (!activeChartId) return;
     const prev = (mapping && typeof mapping === "object") ? mapping : {};
     const next = { ...prev } as any;
     delete next[key];
-    window.dispatchEvent(
-      new CustomEvent("dashboard:update-chart-data", {
-        detail: { chartId: activeChartId, patch: { columnMapping: next } },
-      })
-    );
-    if (key === "detailsColumns") {
-      patchLogicalQueryForTableColumns([]);
-    }
+    patchMapping(next);
   };
 
   const addToMappingArray = (
@@ -1233,9 +1184,6 @@ export function VisualizationsSlideInPanel({
     const prevArr = Array.isArray((mapping as any)?.[key]) ? (mapping as any)[key] : [];
     const nextArr = Array.from(new Set([...prevArr, col].filter((x) => String(x).trim().length > 0)));
     patchMapping({ [key]: nextArr });
-    if (key === "detailsColumns") {
-      patchLogicalQueryForTableColumns(nextArr);
-    }
   };
 
   const removeY = (idx: number) => {
@@ -1521,7 +1469,7 @@ export function VisualizationsSlideInPanel({
               <BarChart3 className="w-4 h-4 text-blue-400" />
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-white truncate">Visualizations</div>
-                <div className="text-xs text-slate-400 truncate">{activeTab === "build" ? "Build" : activeTab === "format" ? "Format" : "Filters"}</div>
+                <div className="text-xs text-slate-400 truncate">Build</div>
               </div>
             </div>
             <button
@@ -1532,27 +1480,6 @@ export function VisualizationsSlideInPanel({
             >
               <Plus className="w-5 h-5" style={{ transform: "rotate(45deg)" }} />
             </button>
-          </div>
-          <div className="mt-3 grid grid-cols-3 gap-2">
-            {([
-              { id: "build", label: "Build" },
-              { id: "format", label: "Format" },
-              { id: "filters", label: "Filters" },
-            ] as const).map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                data-testid={`viz-tab-${tab.id}`}
-                onClick={() => setActiveTab(tab.id)}
-                className={`h-8 rounded-lg border text-xs font-semibold transition ${
-                  activeTab === tab.id
-                    ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-200"
-                    : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
           </div>
           {!!dropRejectHint && (
             <div className="mt-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-100">
@@ -1569,9 +1496,9 @@ export function VisualizationsSlideInPanel({
                 <div className="text-xs text-emerald-200/80 mt-1">Click a chart on the canvas to configure it.</div>
               </div>
             )}
-            {activeChartId && activeTab === "build" && (
+            {activeChartId && (activeTab === "build" || activeTab === "formulas") && (
             <>
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-3 space-y-2">
+            <div className="hidden rounded-2xl border border-white/10 bg-white/5 p-3 space-y-2">
               <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-slate-500">
                 <CalendarDays className="w-3.5 h-3.5 text-slate-400" />
                 Date Presets
@@ -1600,70 +1527,52 @@ export function VisualizationsSlideInPanel({
             </div>
 
             {isDbTableDirectSqlChart && (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-slate-500">Direct SQL Query</div>
-                    <div className="text-[11px] text-slate-400">
-                      Supports <code>{`{{interval_from}}`}</code> and <code>{`{{interval_to}}`}</code>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {!!String(directSql ?? "").trim() && (
-                      <span className="px-2 py-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-[10px] font-semibold text-emerald-200">
-                        Custom SQL
-                      </span>
-                    )}
+              isDirectSqlCollapsed ? (
+                <button
+                  type="button"
+                  onClick={() => setIsDirectSqlCollapsed(false)}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider text-slate-300 hover:bg-white/10"
+                >
+                  Direct SQL Query
+                </button>
+              ) : (
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs uppercase tracking-wider text-slate-400">Direct SQL Query</div>
                     <button
                       type="button"
-                      disabled={!canEdit}
-                      onClick={forceRunDirectSql}
-                      className="px-2.5 py-1.5 rounded-lg border border-white/10 bg-white/5 text-[11px] font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                      onClick={() => setIsDirectSqlCollapsed(true)}
+                      className="px-2.5 py-1.5 rounded-lg border border-white/10 bg-white/5 text-[11px] font-semibold text-slate-200 hover:bg-white/10"
                     >
-                      Run
+                      Collapse
                     </button>
                   </div>
+                  <div className="rounded-xl overflow-hidden border border-white/10 bg-black">
+                    <Editor
+                      height="200px"
+                      language="sql"
+                      value={directSql}
+                      onChange={(v: string | undefined) => patchDirectSql(String(v ?? ""))}
+                      theme="vs-dark"
+                      options={{
+                        minimap: { enabled: false },
+                        fontSize: 12,
+                        wordWrap: "on",
+                        scrollBeyondLastLine: false,
+                        lineNumbers: "on",
+                        folding: true,
+                        scrollbar: { verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+                        padding: { top: 8, bottom: 8 },
+                      }}
+                    />
+                  </div>
                 </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {(["{{interval_from}}", "{{interval_to}}"] as const).map((token) => (
-                    <button
-                      key={token}
-                      type="button"
-                      disabled={!canEdit}
-                      onClick={() => insertDirectSqlToken(token)}
-                      className="px-2 py-1 rounded-lg border border-white/10 bg-white/5 text-[11px] font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {token}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="rounded-xl overflow-hidden border border-white/10 bg-white/5">
-                  <Editor
-                    height="200px"
-                    language="sql"
-                    value={directSql}
-                    onChange={(v: string | undefined) => patchDirectSql(String(v ?? ""))}
-                    theme="vs-dark"
-                    options={{
-                      minimap: { enabled: false },
-                      fontSize: 12,
-                      wordWrap: "on",
-                      scrollBeyondLastLine: false,
-                      lineNumbers: "on",
-                      folding: true,
-                      scrollbar: { verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
-                      padding: { top: 8, bottom: 8 },
-                    }}
-                  />
-                </div>
-              </div>
+              )
             )}
 
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+            <div className="hidden rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
               <div className="flex items-center justify-between gap-2">
-                <div className="text-xs uppercase tracking-wider text-slate-500">Computed Layer</div>
+              <div className="text-xs uppercase tracking-wider text-slate-500">SQL Formulas (DataLens)</div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -2266,59 +2175,14 @@ export function VisualizationsSlideInPanel({
               </div>
             </div>
 
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs uppercase tracking-wider text-slate-500">Visualizations</div>
-                <div className="text-[11px] text-slate-400 truncate">{activeChartId ? `Chart ${activeChartId}` : "No chart selected"}</div>
-              </div>
+            <VizTypePicker
+              activeChartId={activeChartId}
+              canEdit={canEdit}
+              vizType={vizType}
+              onSelect={setVizType}
+            />
 
-              <div className="grid grid-cols-4 gap-2">
-                {([
-                  ["line", "Line", "📈"],
-                  ["area", "Area", "🟩"],
-                  ["bar", "Bar", "📊"],
-                  ["column", "Column", "📶"],
-                  ["pie", "Pie", "🥧"],
-                  ["donut", "Donut", "🍩"],
-                  ["scatter", "Scatter", "🔵"],
-                  ["table", "Table", "📋"],
-                  ["pivot", "Pivot", "🧩"],
-                  ["kpi", "KPI", "🏷️"],
-                  ["funnel", "Funnel", "🔻"],
-                  ["waterfall", "Waterfall", "🪜"],
-                  ["treemap", "Treemap", "🟫"],
-                  ["histogram", "Histogram", "📉"],
-                  ["cohort", "Cohort", "🧠"],
-                  ["slicer", "Slicer", "🎚️"],
-                ] as Array<[string, string, string]>).map(([id, label, icon]) => {
-                  const supported = id === "line" || id === "area" || id === "bar" || id === "pie" || id === "donut" || id === "scatter" || id === "table" || id === "pivot" || id === "kpi" || id === "histogram" || id === "slicer";
-                  const selected = vizType === (id as any);
-                  return (
-                    <button
-                      key={id}
-                      type="button"
-                      disabled={!canEdit || !supported}
-                      onClick={() => supported && setVizType(id as VizType)}
-                      className={`px-2 py-2 rounded-xl border text-[11px] font-semibold transition ${
-                        selected
-                          ? "bg-white/15 border-white/25 text-emerald-300"
-                          : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
-                      } ${!supported ? "opacity-45 cursor-not-allowed" : ""}`}
-                      title={supported ? label : `${label} (coming soon)`}
-                    >
-                      <div className="text-base leading-none">{icon}</div>
-                      <div className="mt-1">{label}</div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs uppercase tracking-wider text-slate-500">Fields</div>
-                <div className="text-[11px] text-slate-400 truncate">Drag from Fields panel</div>
-              </div>
+            <FieldWellsPanel>
 
               {vizType === "table" && (
                 <div className="space-y-3">
@@ -2334,7 +2198,6 @@ export function VisualizationsSlideInPanel({
                       const prevArr = Array.isArray((mapping as any)?.detailsColumns) ? (mapping as any).detailsColumns : [];
                       const nextArr = prevArr.filter((_: any, i: number) => i !== idx);
                       patchMapping({ detailsColumns: nextArr });
-                      patchLogicalQueryForTableColumns(nextArr);
                     }}
                     onClear={() => clearMappingArrayKey("detailsColumns")}
                   />
@@ -2405,6 +2268,9 @@ export function VisualizationsSlideInPanel({
                     }
                     const ref = String(f?.ref ?? "").trim();
                     if (!ref || ref === "__time__") return;
+                  const currentSlicer = (
+                    (activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object"
+                  ) ? (activeChartData as any).slicer : {};
                     window.dispatchEvent(
                       new CustomEvent("dashboard:update-chart-data", {
                         detail: {
@@ -2412,9 +2278,10 @@ export function VisualizationsSlideInPanel({
                           patch: {
                             kind: "slicer",
                             slicer: {
+                            ...currentSlicer,
                               fieldRef: ref,
                               mode: String((activeChartData as any)?.slicer?.mode ?? "list").trim() || "list",
-                              multiSelect: true,
+                              multiSelect: Boolean((activeChartData as any)?.slicer?.multiSelect !== false),
                               selectedValues: Array.isArray((activeChartData as any)?.slicer?.selectedValues)
                                 ? (activeChartData as any).slicer.selectedValues
                                 : [],
@@ -2438,9 +2305,12 @@ export function VisualizationsSlideInPanel({
                           patch: {
                             kind: "slicer",
                             slicer: {
+                              ...(((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                                ? (activeChartData as any).slicer
+                                : {}),
                               fieldRef: "",
                               mode: String((activeChartData as any)?.slicer?.mode ?? "list").trim() || "list",
-                              multiSelect: true,
+                              multiSelect: Boolean((activeChartData as any)?.slicer?.multiSelect !== false),
                               selectedValues: [],
                               dateOp: ((activeChartData as any)?.slicer?.dateOp === "between" || (activeChartData as any)?.slicer?.dateOp === "gte" || (activeChartData as any)?.slicer?.dateOp === "lte")
                                 ? (activeChartData as any).slicer.dateOp
@@ -2456,13 +2326,13 @@ export function VisualizationsSlideInPanel({
                 />
               )}
 
-              {vizType === "pie" && (
+              {(vizType === "pie" || vizType === "donut") && (
                 <div className="space-y-3">
                   <BuildDropZone
-                    label="Category"
+                    label="Legend"
                     value={String(mapping?.groupBy ?? "")}
                     onDrop={(f) => {
-                      const categorySlot = VIZ_SLOTS.pie.find((s) => s.key === "category");
+                      const categorySlot = VIZ_SLOTS[vizType].find((s) => s.key === "category");
                       if (!categorySlot || !isAllowedInSlot(categorySlot, f)) {
                         rejectDrop();
                         return;
@@ -2478,7 +2348,7 @@ export function VisualizationsSlideInPanel({
                     label="Values"
                     value=""
                     onDrop={(f) => {
-                      const valuesSlot = VIZ_SLOTS.pie.find((s) => s.key === "values");
+                      const valuesSlot = VIZ_SLOTS[vizType].find((s) => s.key === "values");
                       if (!valuesSlot || !isAllowedInSlot(valuesSlot, f)) {
                         rejectDrop();
                         return;
@@ -2518,10 +2388,10 @@ export function VisualizationsSlideInPanel({
                   )}
 
                   <BuildMultiDropZone
-                    label="Tooltip"
+                    label="Tooltips"
                     values={Array.isArray((mapping as any)?.tooltipColumns) ? (mapping as any).tooltipColumns : []}
                     onDrop={(f) => {
-                      const ttSlot = VIZ_SLOTS.pie.find((s) => s.key === "tooltips");
+                      const ttSlot = VIZ_SLOTS[vizType].find((s) => s.key === "tooltips");
                       if (!ttSlot || !isAllowedInSlot(ttSlot, f)) {
                         rejectDrop();
                         return;
@@ -2539,9 +2409,9 @@ export function VisualizationsSlideInPanel({
                 </div>
               )}
 
-              {(vizType === "line" || vizType === "bar") && (
+              {(vizType === "line" || vizType === "bar" || vizType === "area" || vizType === "scatter" || vizType === "histogram") && (
               <BuildDropZone
-                label="Axis (X)"
+                label="X Axis"
                 value={String(mapping?.xColumn ?? "")}
                 onDrop={(f) => {
                   if (f.ref === "__time__") {
@@ -2576,14 +2446,10 @@ export function VisualizationsSlideInPanel({
 
               )}
 
-              {(vizType === "line" || vizType === "bar") && (
+              {(vizType === "line" || vizType === "bar" || vizType === "area" || vizType === "scatter" || vizType === "histogram") && (
               <div className="pt-2 border-t border-white/10 space-y-2">
-                {(Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : []).length === 0 && (
-                  <div className="text-xs text-slate-500">Drop measures here (multi-metric supported).</div>
-                )}
-
                 <BuildDropZone
-                  label="Axis (Y)"
+                  label="Values"
                   value=""
                   onDrop={(f) => {
                     const valuesSlot = VIZ_SLOTS[vizType].find((s) => s.key === "values");
@@ -2603,12 +2469,47 @@ export function VisualizationsSlideInPanel({
                   }}
                 />
 
-                <div className="space-y-2">
+                <div className="space-y-1">
                   {(Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : []).map((m: any, idx: number) => (
-                    <div key={`${idx}_${String(m?.col ?? "")}`} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                    <div
+                      key={`${idx}_${String(m?.col ?? "")}`}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "copy";
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        try {
+                          const parsed = parseDropEvent(e);
+                          if (!parsed || parsed.kind !== "field") return;
+                          const f = parsed.field;
+                          const valuesSlot = VIZ_SLOTS[vizType].find((s) => s.key === "values");
+                          if (!valuesSlot || !isAllowedInSlot(valuesSlot, f)) {
+                            rejectDrop();
+                            return;
+                          }
+                          const prevY = Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : [];
+                          const prevY2 = Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : [];
+                          const col = f.ref;
+                          const nextY2 = prevY2.filter((yy: any) => String(yy?.col ?? "") !== col);
+                          const nextY = prevY.map((yy: any, i: number) => i === idx
+                            ? {
+                                ...yy,
+                                col,
+                                agg: (f?.fieldType === "measure" ? String((yy as any)?.agg ?? "SUM") : "COUNTD"),
+                                ...(f?.fieldType ? { fieldType: f.fieldType } : {}),
+                              }
+                            : yy);
+                          patchMapping({ yColumns: nextY, y2Columns: nextY2 });
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-1.5"
+                    >
                       <div className="flex items-center justify-between gap-2">
-                        <div className="text-xs font-semibold text-white truncate">{String(m?.col || "(drop measure)")}</div>
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="text-[10px] font-medium text-slate-100 truncate min-w-0">{String(m?.col || "Add data fields here")}</div>
+                        <div className="flex items-center gap-1 shrink-0">
                           <select
                             value={String(m?.agg ?? "SUM")}
                             disabled={!canEdit}
@@ -2617,7 +2518,7 @@ export function VisualizationsSlideInPanel({
                               const nextY = prevY.map((yy: any, i: number) => i === idx ? { ...yy, agg: String(e.target.value) } : yy);
                               patchMapping({ yColumns: nextY });
                             }}
-                            className="h-7 px-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-slate-200 disabled:opacity-40"
+                            className="h-6 px-1 rounded border border-white/10 bg-white/5 text-[10px] text-slate-200 disabled:opacity-40 max-w-[72px]"
                             title="Aggregation"
                           >
                             {(["SUM", "COUNT", "COUNTD", "AVG", "MIN", "MAX"] as const).map((a) => (
@@ -2628,39 +2529,12 @@ export function VisualizationsSlideInPanel({
                             type="button"
                             disabled={!canEdit}
                             onClick={() => removeY(idx)}
-                            className="p-1 rounded-lg hover:bg-white/10 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="p-0.5 rounded hover:bg-white/10 text-slate-400 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed text-[10px] leading-none"
                             title="Remove"
                           >
-                            <Plus className="w-4 h-4" style={{ transform: "rotate(45deg)" }} />
+                            ×
                           </button>
                         </div>
-                      </div>
-                      <div className="mt-2">
-                        <BuildDropZone
-                          label="Measure"
-                          compact
-                          value={String(m?.col ?? "")}
-                          onDrop={(f) => {
-                            const prevY = Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : [];
-                            const prevY2 = Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : [];
-                            const col = f.ref;
-                            const nextY2 = prevY2.filter((yy: any) => String(yy?.col ?? "") !== col);
-                            const nextY = prevY.map((yy: any, i: number) => i === idx
-                              ? {
-                                  ...yy,
-                                  col,
-                                  agg: (f?.fieldType === "measure" ? String((yy as any)?.agg ?? "SUM") : "COUNTD"),
-                                  ...(f?.fieldType ? { fieldType: f.fieldType } : {}),
-                                }
-                              : yy);
-                            patchMapping({ yColumns: nextY, y2Columns: nextY2 });
-                          }}
-                          onClear={() => {
-                            const prevY = Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : [];
-                            const nextY = prevY.map((yy: any, i: number) => i === idx ? { ...yy, col: "" } : yy);
-                            patchMapping({ yColumns: nextY });
-                          }}
-                        />
                       </div>
                     </div>
                   ))}
@@ -2669,14 +2543,10 @@ export function VisualizationsSlideInPanel({
 
               )}
 
-              {(vizType === "line" || vizType === "bar") && (
+              {(vizType === "line" || vizType === "bar" || vizType === "area" || vizType === "scatter" || vizType === "histogram") && (
               <div className="pt-2 border-t border-white/10 space-y-2">
-                {(Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : []).length === 0 && (
-                  <div className="text-xs text-slate-500">Drop measures here to enable secondary Y axis.</div>
-                )}
-
                 <BuildDropZone
-                  label="Aux Axis (Y2)"
+                  label="Secondary values"
                   value=""
                   onDrop={(f) => {
                     const valuesSlot = VIZ_SLOTS[vizType].find((s) => s.key === "values");
@@ -2698,12 +2568,47 @@ export function VisualizationsSlideInPanel({
                   }}
                 />
 
-                <div className="space-y-2">
+                <div className="space-y-1">
                   {(Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : []).map((m: any, idx: number) => (
-                    <div key={`y2_${idx}_${String(m?.col ?? "")}`} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                    <div
+                      key={`y2_${idx}_${String(m?.col ?? "")}`}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "copy";
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        try {
+                          const parsed = parseDropEvent(e);
+                          if (!parsed || parsed.kind !== "field") return;
+                          const f = parsed.field;
+                          const valuesSlot = VIZ_SLOTS[vizType].find((s) => s.key === "values");
+                          if (!valuesSlot || !isAllowedInSlot(valuesSlot, f)) {
+                            rejectDrop();
+                            return;
+                          }
+                          const prevY = Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : [];
+                          const prevY2 = Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : [];
+                          const col = f.ref;
+                          const nextY = prevY.filter((yy: any) => String(yy?.col ?? "") !== col);
+                          const nextY2 = prevY2.map((yy: any, i: number) => i === idx
+                            ? {
+                                ...yy,
+                                col,
+                                agg: (f?.fieldType === "measure" ? String((yy as any)?.agg ?? "SUM") : "COUNTD"),
+                                ...(f?.fieldType ? { fieldType: f.fieldType } : {}),
+                              }
+                            : yy);
+                          patchMapping({ yColumns: nextY, y2Columns: nextY2 });
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-1.5"
+                    >
                       <div className="flex items-center justify-between gap-2">
-                        <div className="text-xs font-semibold text-white truncate">{String(m?.col || "(drop measure)")}</div>
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="text-[10px] font-medium text-slate-100 truncate min-w-0">{String(m?.col || "Add data fields here")}</div>
+                        <div className="flex items-center gap-1 shrink-0">
                           <select
                             value={String(m?.agg ?? "SUM")}
                             disabled={!canEdit}
@@ -2712,7 +2617,7 @@ export function VisualizationsSlideInPanel({
                               const nextY2 = prevY2.map((yy: any, i: number) => i === idx ? { ...yy, agg: String(e.target.value) } : yy);
                               patchMapping({ y2Columns: nextY2 });
                             }}
-                            className="h-7 px-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-slate-200 disabled:opacity-40"
+                            className="h-6 px-1 rounded border border-white/10 bg-white/5 text-[10px] text-slate-200 disabled:opacity-40 max-w-[72px]"
                             title="Aggregation"
                           >
                             {(["SUM", "COUNT", "COUNTD", "AVG", "MIN", "MAX"] as const).map((a) => (
@@ -2723,56 +2628,23 @@ export function VisualizationsSlideInPanel({
                             type="button"
                             disabled={!canEdit}
                             onClick={() => removeY2(idx)}
-                            className="p-1 rounded-lg hover:bg-white/10 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="p-0.5 rounded hover:bg-white/10 text-slate-400 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed text-[10px] leading-none"
                             title="Remove"
                           >
-                            <Plus className="w-4 h-4" style={{ transform: "rotate(45deg)" }} />
+                            ×
                           </button>
                         </div>
                       </div>
-                      <div className="mt-2">
-                        <BuildDropZone
-                          label="Measure"
-                          compact
-                          value={String(m?.col ?? "")}
-                          onDrop={(f) => {
-                            const prevY = Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : [];
-                            const prevY2 = Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : [];
-
-                            // mutually exclusive: remove from primary Y
-                            const col = f.ref;
-                            const nextY = prevY.filter((yy: any) => String(yy?.col ?? "") !== col);
-                            const nextY2 = prevY2.map((yy: any, i: number) => i === idx
-                              ? {
-                                  ...yy,
-                                  col,
-                                  agg: (f?.fieldType === "measure" ? String((yy as any)?.agg ?? "SUM") : "COUNTD"),
-                                  ...(f?.fieldType ? { fieldType: f.fieldType } : {}),
-                                }
-                              : yy);
-                            patchMapping({ yColumns: nextY, y2Columns: nextY2 });
-                          }}
-                          onClear={() => {
-                            const prevY2 = Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns : [];
-                            const nextY2 = prevY2.map((yy: any, i: number) => i === idx ? { ...yy, col: "" } : yy);
-                            patchMapping({ y2Columns: nextY2 });
-                          }}
-                        />
-                      </div>
                     </div>
                   ))}
-                </div>
-
-                <div className="text-xs text-slate-400">
-                  Drop a measure into the well above to add it to Y2.
                 </div>
               </div>
 
               )}
 
-              {(vizType === "line" || vizType === "bar") && (
+              {(vizType === "line" || vizType === "bar" || vizType === "area" || vizType === "scatter" || vizType === "histogram") && (
               <BuildDropZone
-                label="Legend (group by)"
+                label="Legend"
                 value={String(mapping?.groupBy ?? "")}
                 onDrop={(f) => {
                   if (f.ref === "__time__") return;
@@ -2792,7 +2664,7 @@ export function VisualizationsSlideInPanel({
 
               )}
 
-              {(vizType === "line" || vizType === "bar") &&
+              {(vizType === "line" || vizType === "bar" || vizType === "area" || vizType === "scatter" || vizType === "histogram") &&
                 (((Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns.length : 0)
                   + (Array.isArray((mapping as any)?.y2Columns) ? (mapping as any).y2Columns.length : 0)) > 1) && (
                 <div className="text-[11px] text-slate-400 px-1">
@@ -2839,56 +2711,6 @@ export function VisualizationsSlideInPanel({
 
               )}
 
-              {(vizType === "line" || vizType === "bar" || vizType === "area") && (
-              <div className="pt-2 border-t border-white/10 space-y-2">
-                <div className="text-xs uppercase tracking-wider text-slate-500">Labels</div>
-                <label className="flex items-center gap-2 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={Boolean((mapping as any)?.showLabels)}
-                    disabled={!canEdit}
-                    onChange={(e) => patchMapping({ showLabels: Boolean(e.target.checked) } as any)}
-                    className="accent-emerald-400"
-                  />
-                  Show data labels
-                </label>
-              </div>
-
-              )}
-
-              {(vizType === "bar" || vizType === "area") && (
-              <div className="pt-2 border-t border-white/10 space-y-2">
-                <div className="text-xs uppercase tracking-wider text-slate-500">Stack Mode</div>
-                <select
-                  value={String((mapping as any)?.stackMode ?? "none")}
-                  disabled={!canEdit}
-                  onChange={(e) => patchMapping({ stackMode: String(e.target.value) } as any)}
-                  className="h-8 w-full px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-slate-200 disabled:opacity-40"
-                >
-                  <option value="none">None</option>
-                  <option value="stacked">Stacked</option>
-                  <option value="normalized">100% stacked</option>
-                </select>
-              </div>
-
-              )}
-
-              {(vizType === "line" || vizType === "bar" || vizType === "area") && (
-              <div className="pt-2 border-t border-white/10 space-y-2">
-                <div className="text-xs uppercase tracking-wider text-slate-500">NULL values</div>
-                <select
-                  value={String((mapping as any)?.nullDisplay ?? "as_zero")}
-                  disabled={!canEdit}
-                  onChange={(e) => patchMapping({ nullDisplay: String(e.target.value) } as any)}
-                  className="h-8 w-full px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-slate-200 disabled:opacity-40"
-                >
-                  <option value="as_zero">As zero</option>
-                  <option value="skip">Skip (gaps)</option>
-                  <option value="interpolate">Interpolate</option>
-                </select>
-              </div>
-
-              )}
 
               <div className="pt-2 border-t border-white/10 space-y-2">
                 <div className="text-xs uppercase tracking-wider text-slate-500">Filters</div>
@@ -2982,12 +2804,12 @@ export function VisualizationsSlideInPanel({
                 ))}
               </div>
 
-              {(vizType === "line" || vizType === "bar") && (
+              {(vizType === "line" || vizType === "bar" || vizType === "area" || vizType === "scatter" || vizType === "histogram") && (
               <div className="pt-2 border-t border-white/10 space-y-2">
                 <div className="text-xs uppercase tracking-wider text-slate-500">Legend / Tooltip / Details</div>
 
                 <BuildMultiDropZone
-                  label="Tooltip"
+                  label="Tooltips"
                   values={Array.isArray((mapping as any)?.tooltipColumns) ? (mapping as any).tooltipColumns : []}
                   onDrop={(f) => {
                     const ttSlot = VIZ_SLOTS[vizType].find((s) => s.key === "tooltips");
@@ -3016,7 +2838,6 @@ export function VisualizationsSlideInPanel({
                     const prevArr = Array.isArray((mapping as any)?.detailsColumns) ? (mapping as any).detailsColumns : [];
                     const nextArr = prevArr.filter((_: any, i: number) => i !== idx);
                     patchMapping({ detailsColumns: nextArr });
-                    patchLogicalQueryForTableColumns(nextArr);
                   }}
                   onClear={() => clearMappingArrayKey("detailsColumns")}
                 />
@@ -3052,27 +2873,419 @@ export function VisualizationsSlideInPanel({
 
               )}
 
-              <div className="pt-2 border-t border-white/10">
-                <div className="text-xs text-slate-400">
-                  Drag fields from <span className="text-slate-200 font-semibold">Fields</span> panel into these wells.
+              {vizType === "kpi" && (
+                <div className="space-y-3">
+                  <BuildDropZone
+                    label="Value"
+                    value={String((Array.isArray((mapping as any)?.yColumns) ? (mapping as any).yColumns : [])[0]?.col ?? "")}
+                    onDrop={(f) => {
+                      const valuesSlot = VIZ_SLOTS.kpi.find((s) => s.key === "values");
+                      if (!valuesSlot || !isAllowedInSlot(valuesSlot, f)) {
+                        rejectDrop();
+                        return;
+                      }
+                      const col = String(f?.ref ?? "").trim();
+                      if (!col || col === "__time__") return;
+                      patchMapping({ yColumns: [{ col, agg: (f?.fieldType === "measure" ? "SUM" : "COUNTD") }], y2Columns: [] });
+                    }}
+                    onClear={() => patchMapping({ yColumns: [], y2Columns: [] })}
+                  />
                 </div>
-              </div>
-            </div>
+              )}
 
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-slate-300" />
-                <div className="text-xs text-slate-400">
-                  Use the Fields panel to browse and drag columns.
-                </div>
-              </div>
+            </FieldWellsPanel>
+
+            <div className="mt-2 rounded-md border border-white/10 bg-white/[0.02] px-2 py-1.5 flex items-center gap-2">
+              <Layers className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <div className="text-[10px] text-slate-500">Use Data to browse tables and fields.</div>
             </div>
             </>
             )}
 
             {activeChartId && activeTab === "format" && (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
-                <div className="text-xs uppercase tracking-wider text-slate-500">Format</div>
+              <FormatPanel>
+                {vizType === "slicer" && (
+                  <div className="space-y-3 rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Slicer settings</div>
+                    <div>
+                      <div className="text-xs text-slate-400 mb-1">Style</div>
+                      <select
+                        value={String((activeChartData as any)?.slicer?.mode ?? "list")}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, mode: String(e.target.value || "list") } },
+                            },
+                          }));
+                        }}
+                        className="h-8 w-full px-3 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                      >
+                        <option value="list">List</option>
+                        <option value="dropdown">Dropdown</option>
+                        <option value="tile">Tile</option>
+                        <option value="dateRange">Date Range</option>
+                        <option value="range">Numeric Range</option>
+                        <option value="input">Input</option>
+                        <option value="hierarchy">Hierarchy</option>
+                      </select>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={Boolean((activeChartData as any)?.slicer?.multiSelect !== false)}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, multiSelect: Boolean(e.target.checked) } },
+                            },
+                          }));
+                        }}
+                        className="accent-emerald-400"
+                      />
+                      Multi select
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={Boolean((activeChartData as any)?.slicer?.showSelectAll)}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, showSelectAll: Boolean(e.target.checked) } },
+                            },
+                          }));
+                        }}
+                        className="accent-emerald-400"
+                      />
+                      Show "Select all"
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={Boolean((activeChartData as any)?.slicer?.showSearch !== false)}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, showSearch: Boolean(e.target.checked) } },
+                            },
+                          }));
+                        }}
+                        className="accent-emerald-400"
+                      />
+                      Show search
+                    </label>
+                    <div>
+                      <div className="text-xs text-slate-400 mb-1">Orientation</div>
+                      <select
+                        value={String((activeChartData as any)?.slicer?.orientation ?? "vertical")}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          const orientation = String(e.target.value ?? "vertical") === "horizontal" ? "horizontal" : "vertical";
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, orientation } },
+                            },
+                          }));
+                        }}
+                        className="h-8 w-full px-3 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                      >
+                        <option value="vertical">Vertical</option>
+                        <option value="horizontal">Horizontal</option>
+                      </select>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={Boolean((activeChartData as any)?.slicer?.restrictToLeafNodes)}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, restrictToLeafNodes: Boolean(e.target.checked) } },
+                            },
+                          }));
+                        }}
+                        className="accent-emerald-400"
+                      />
+                      Restrict to leaf nodes
+                    </label>
+                    <div className="pt-2 border-t border-white/10 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                      Slicer header
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={Boolean((activeChartData as any)?.slicer?.headerVisible !== false)}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, headerVisible: Boolean(e.target.checked) } },
+                            },
+                          }));
+                        }}
+                        className="accent-emerald-400"
+                      />
+                      Show header
+                    </label>
+                    <div>
+                      <div className="text-xs text-slate-400 mb-1">Title text</div>
+                      <input
+                        value={String((activeChartData as any)?.slicer?.headerTitle ?? "")}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, headerTitle: String(e.target.value ?? "") } },
+                            },
+                          }));
+                        }}
+                        className="h-8 w-full px-3 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                        placeholder="Custom slicer title"
+                      />
+                    </div>
+                    <div className="pt-2 border-t border-white/10 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                      Values
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-400 mb-1">Font size</div>
+                      <input
+                        type="range"
+                        min={10}
+                        max={24}
+                        step={1}
+                        value={Number((activeChartData as any)?.slicer?.valuesFontSize ?? 12)}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          const size = Math.max(10, Math.min(24, Number(e.target.value ?? 12)));
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, valuesFontSize: size } },
+                            },
+                          }));
+                        }}
+                        className="w-full accent-emerald-400"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-400 mb-1">Background color</div>
+                      <input
+                        type="color"
+                        value={String((activeChartData as any)?.slicer?.valuesBackgroundColor ?? "#0f172a")}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, valuesBackgroundColor: String(e.target.value ?? "#0f172a") } },
+                            },
+                          }));
+                        }}
+                        className="h-8 w-full rounded-lg bg-white/5 border border-white/10"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-400 mb-1">Scope</div>
+                      <select
+                        value={String((activeChartData as any)?.__slicerBiScope ?? "report")}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const curScope = String(e.target.value || "report");
+                          const rawLink = String((activeChartData as any)?.__sourceChartId ?? "").trim();
+                          const nextScope = (curScope === "report" || curScope === "page" || curScope === "visual")
+                            ? curScope
+                            : "report";
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: {
+                                __slicerBiScope: nextScope,
+                                ...(nextScope === "visual" && rawLink ? { __sourceChartId: rawLink } : {}),
+                              },
+                            },
+                          }));
+                        }}
+                        className="h-8 w-full px-3 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                      >
+                        <option value="report">All charts</option>
+                        <option value="page">Current page</option>
+                        <option value="visual" disabled={!String((activeChartData as any)?.__sourceChartId ?? "").trim()}>
+                          Source visual only
+                        </option>
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-400 mb-1">Sync group</div>
+                      <input
+                        value={String((activeChartData as any)?.slicer?.syncGroup ?? "")}
+                        disabled={!canEdit}
+                        onChange={(e) => {
+                          const cur = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+                            ? (activeChartData as any).slicer
+                            : {};
+                          window.dispatchEvent(new CustomEvent("dashboard:update-chart-data", {
+                            detail: {
+                              chartId: activeChartId,
+                              patch: { kind: "slicer", slicer: { ...cur, syncGroup: String(e.target.value ?? "") } },
+                            },
+                          }));
+                        }}
+                        className="h-8 w-full px-3 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                        placeholder="e.g. geo-global"
+                      />
+                    </div>
+                  </div>
+                )}
+                {(vizType === "table" || vizType === "pivot") && (
+                  <div className="space-y-2 rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Sorting</div>
+                    <select
+                      value={String((mapping as any)?.orderBy?.[0]?.field ?? "")}
+                      disabled={!canEdit}
+                      onChange={(e) => {
+                        const f = String(e.target.value ?? "").trim();
+                        const prevDir = String((mapping as any)?.orderBy?.[0]?.dir ?? "asc").toLowerCase() === "desc" ? "desc" : "asc";
+                        patchMapping({ orderBy: f ? [{ field: f, dir: prevDir as "asc" | "desc" }] : [] } as any);
+                      }}
+                      className="h-8 w-full px-3 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                    >
+                      <option value="">(none)</option>
+                      {[
+                        ...semanticFieldLists.dims.map((x) => x.ref),
+                        ...semanticFieldLists.meas.map((x) => x.ref),
+                      ].map((ref) => (
+                        <option key={ref} value={ref}>{ref}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={String((mapping as any)?.orderBy?.[0]?.dir ?? "asc")}
+                      disabled={!canEdit || !String((mapping as any)?.orderBy?.[0]?.field ?? "").trim()}
+                      onChange={(e) => {
+                        const dir = String(e.target.value ?? "asc").toLowerCase() === "desc" ? "desc" : "asc";
+                        const f = String((mapping as any)?.orderBy?.[0]?.field ?? "").trim();
+                        if (!f) return;
+                        patchMapping({ orderBy: [{ field: f, dir }] } as any);
+                      }}
+                      className="h-8 w-full px-3 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                    >
+                      <option value="asc">Ascending</option>
+                      <option value="desc">Descending</option>
+                    </select>
+                    <div className="pt-2 border-t border-white/10 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                      Conditional formatting
+                    </div>
+                    <select
+                      value={String((mapping as any)?.conditionalFormatting?.field ?? "")}
+                      disabled={!canEdit}
+                      onChange={(e) => {
+                        const field = String(e.target.value ?? "").trim();
+                        const prev = ((mapping as any)?.conditionalFormatting && typeof (mapping as any).conditionalFormatting === "object")
+                          ? (mapping as any).conditionalFormatting
+                          : {};
+                        patchMapping({
+                          conditionalFormatting: field
+                            ? { field, op: String(prev.op ?? "gte"), value: String(prev.value ?? "0"), color: String(prev.color ?? "#065f46") }
+                            : undefined,
+                        } as any);
+                      }}
+                      className="h-8 w-full px-3 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                    >
+                      <option value="">(disabled)</option>
+                      {[
+                        ...semanticFieldLists.dims.map((x) => x.ref),
+                        ...semanticFieldLists.meas.map((x) => x.ref),
+                      ].map((ref) => (
+                        <option key={`cf_${ref}`} value={ref}>{ref}</option>
+                      ))}
+                    </select>
+                    <div className="grid grid-cols-3 gap-2">
+                      <select
+                        value={String((mapping as any)?.conditionalFormatting?.op ?? "gte")}
+                        disabled={!canEdit || !String((mapping as any)?.conditionalFormatting?.field ?? "").trim()}
+                        onChange={(e) => {
+                          const prev = ((mapping as any)?.conditionalFormatting && typeof (mapping as any).conditionalFormatting === "object")
+                            ? (mapping as any).conditionalFormatting
+                            : {};
+                          patchMapping({ conditionalFormatting: { ...prev, op: String(e.target.value ?? "gte") } } as any);
+                        }}
+                        className="h-8 px-2 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                      >
+                        <option value="gte">&gt;=</option>
+                        <option value="gt">&gt;</option>
+                        <option value="lte">&lt;=</option>
+                        <option value="lt">&lt;</option>
+                        <option value="eq">=</option>
+                      </select>
+                      <input
+                        value={String((mapping as any)?.conditionalFormatting?.value ?? "0")}
+                        disabled={!canEdit || !String((mapping as any)?.conditionalFormatting?.field ?? "").trim()}
+                        onChange={(e) => {
+                          const prev = ((mapping as any)?.conditionalFormatting && typeof (mapping as any).conditionalFormatting === "object")
+                            ? (mapping as any).conditionalFormatting
+                            : {};
+                          patchMapping({ conditionalFormatting: { ...prev, value: String(e.target.value ?? "0") } } as any);
+                        }}
+                        className="h-8 px-2 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                        placeholder="Threshold"
+                      />
+                      <input
+                        value={String((mapping as any)?.conditionalFormatting?.color ?? "#065f46")}
+                        disabled={!canEdit || !String((mapping as any)?.conditionalFormatting?.field ?? "").trim()}
+                        onChange={(e) => {
+                          const prev = ((mapping as any)?.conditionalFormatting && typeof (mapping as any).conditionalFormatting === "object")
+                            ? (mapping as any).conditionalFormatting
+                            : {};
+                          patchMapping({ conditionalFormatting: { ...prev, color: String(e.target.value ?? "#065f46") } } as any);
+                        }}
+                        className="h-8 px-2 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-200"
+                        placeholder="#065f46"
+                      />
+                    </div>
+                  </div>
+                )}
                 {(vizType === "line" || vizType === "bar" || vizType === "area") && (
                   <label className="flex items-center gap-2 text-xs text-slate-300">
                     <input
@@ -3113,7 +3326,7 @@ export function VisualizationsSlideInPanel({
                     </select>
                   </div>
                 )}
-              </div>
+              </FormatPanel>
             )}
 
             {activeChartId && activeTab === "filters" && (

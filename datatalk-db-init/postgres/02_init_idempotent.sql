@@ -30,6 +30,10 @@ WHERE NOT EXISTS (
   SELECT 1 FROM datatalk.sample_events WHERE event_name = 'hello-postgres'
 );
 
+CREATE SCHEMA IF NOT EXISTS pa_upload AUTHORIZATION datatalk;
+GRANT USAGE ON SCHEMA pa_upload TO datatalk;
+ALTER DEFAULT PRIVILEGES FOR ROLE datatalk IN SCHEMA pa_upload GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO datatalk;
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE SCHEMA IF NOT EXISTS datatalk_meta AUTHORIZATION datatalk;

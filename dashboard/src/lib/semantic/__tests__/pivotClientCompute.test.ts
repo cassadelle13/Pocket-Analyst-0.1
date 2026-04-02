@@ -1,4 +1,5 @@
 import { computePivotResultSync } from "../pivotClientCompute";
+import { test } from "vitest";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -33,4 +34,6 @@ function main() {
   console.log("pivot client compute suite: OK");
 }
 
-main();
+test("pivot client compute suite", () => {
+  main();
+});

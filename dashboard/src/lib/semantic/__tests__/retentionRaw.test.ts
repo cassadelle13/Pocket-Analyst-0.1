@@ -1,4 +1,5 @@
 import { compilePivotQueryRaw } from "../retentionCompiler";
+import { test } from "vitest";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -50,4 +51,6 @@ function main() {
   console.log("retention raw compiler suite: OK");
 }
 
-main();
+test("retention raw compiler suite", () => {
+  main();
+});

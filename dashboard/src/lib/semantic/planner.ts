@@ -42,9 +42,9 @@ export function scopeBiFiltersForRequest(
   return raw.filter((f: any) => {
     const sc = (f?.scope === "report" || f?.scope === "page" || f?.scope === "visual") ? f.scope : "visual";
     if (sc === "report") return true;
-    if (sc === "page") return !!ctxPageKey && String(f?.pageKey ?? "") === ctxPageKey;
+    if (sc === "page") return !!ctxPageKey && String(f?.pageKey ?? "").trim() === ctxPageKey;
     // visual
-    return !!ctxChartId && String(f?.sourceChartId ?? "") === ctxChartId;
+    return !!ctxChartId && String(f?.sourceChartId ?? "").trim() === ctxChartId;
   });
 }
 
@@ -201,7 +201,8 @@ function isLogicalOp(op: unknown): op is LogicalFilter["op"] {
     op === "endswith" ||
     op === "iendswith" ||
     op === "isnull" ||
-    op === "isnotnull"
+    op === "isnotnull" ||
+    op === "top_n"
   );
 }
 
@@ -210,11 +211,30 @@ function normalizeFilters(filters: Array<LogicalFilter | any> | undefined | null
   return filters
     .map((f) => ({
       field: String(f?.field ?? "").trim(),
+      fieldAlias: String(f?.fieldAlias ?? "").trim(),
       op: f?.op,
       values: Array.isArray(f?.values) ? f.values : (f?.values != null ? [f.values] : []),
+      logicGroup: String(f?.logicGroup ?? "").trim(),
+      logicOp: String(f?.logicOp ?? "").toLowerCase() === "or" ? "or" : "and",
+      topN: f?.topN && typeof f.topN === "object" ? f.topN : undefined,
     }))
-    .filter((f) => !!f.field && isLogicalOp(f.op))
-    .map((f) => ({ field: f.field, op: f.op, values: f.values }));
+    .filter((f) => {
+      if (!f.field || !isLogicalOp(f.op)) return false;
+      // Empty IN means "no restriction" for UI clear flows, not "match nothing".
+      if (f.op === "in" && (!Array.isArray(f.values) || f.values.length === 0)) return false;
+      // Placeholder eq/neq from filter UI (values not filled yet) — skip, do not rewrite to IS NULL.
+      if ((f.op === "eq" || f.op === "neq") && (!Array.isArray(f.values) || f.values.length === 0)) return false;
+      return true;
+    })
+    .map((f) => ({
+      field: f.field,
+      op: f.op,
+      values: f.values,
+      ...(f.logicGroup ? { logicGroup: f.logicGroup } : {}),
+      ...(f.logicOp ? { logicOp: f.logicOp as "and" | "or" } : {}),
+      ...(f.fieldAlias ? { fieldAlias: f.fieldAlias } : {}),
+      ...(f.topN ? { topN: f.topN } : {}),
+    } as any));
 }
 
 function mergeGlobalFiltersForRequest(
@@ -223,14 +243,6 @@ function mergeGlobalFiltersForRequest(
 ): LogicalFilter[] {
   if (!global || typeof global !== "object") return [];
   const raw = scopeBiFiltersForRequest(global, requestContext);
-  const ctxChartId = String(requestContext?.chartId ?? "").trim();
-  const ctxPageKey = String(requestContext?.pageKey ?? "").trim();
-
-  // Back-compat mode: if no context provided, include all global filters (old behavior).
-  if (!ctxChartId && !ctxPageKey) {
-    return normalizeFilters(raw);
-  }
-
   return normalizeFilters(raw);
 }
 
@@ -244,13 +256,35 @@ export function mergeFilters(
   return [...b, ...a];
 }
 
+function isFilterReachableFromSource(
+  sourceModelName: string,
+  filterRef: string,
+  semanticModel: SemanticModelV1,
+  joinEdges: JoinEdge[]
+): boolean {
+  try {
+    const targetModel = splitRef(filterRef).model;
+    if (!targetModel) return false;
+    if (targetModel === sourceModelName) return true;
+    return !!findJoinPath(joinEdges, sourceModelName, targetModel);
+  } catch {
+    return false;
+  }
+}
+
 export function renderWhere(
   filters: LogicalFilter[],
   fieldSqlByRef: (ref: string) => string,
   dialect: SqlDialect,
   valueTypeByRef?: (ref: string) => FieldValueType
 ): string {
-  const clauses: string[] = [];
+  const entries: Array<{ clause: string; group: string; logic: "and" | "or" }> = [];
+  const escapeLikePattern = (value: string): string => (
+    String(value ?? "")
+      .replace(/\\/g, "\\\\")
+      .replace(/%/g, "\\%")
+      .replace(/_/g, "\\_")
+  );
 
   const toLiteral = (value: unknown, type: FieldValueType): string => {
     if (value == null) return "NULL";
@@ -290,102 +324,113 @@ export function renderWhere(
     const values = Array.isArray(f.values) ? f.values : [];
     const fieldSql = fieldSqlByRef(f.field);
     const valueType = valueTypeByRef ? valueTypeByRef(f.field) : "unknown";
+    const group = String((f as any)?.logicGroup ?? "").trim() || "__default__";
+    const logic: "and" | "or" = String((f as any)?.logicOp ?? "").toLowerCase() === "or" ? "or" : "and";
+    let clause = "";
 
     if (op === "eq") {
-      clauses.push(`${fieldSql} = ${toLiteral(values[0], valueType)}`);
-      continue;
+      clause = values[0] == null ? `${fieldSql} IS NULL` : `${fieldSql} = ${toLiteral(values[0], valueType)}`;
     }
-    if (op === "neq") {
-      clauses.push(`${fieldSql} != ${toLiteral(values[0], valueType)}`);
-      continue;
+    else if (op === "neq") {
+      clause = values[0] == null ? `${fieldSql} IS NOT NULL` : `${fieldSql} != ${toLiteral(values[0], valueType)}`;
     }
-    if (op === "gt") {
-      clauses.push(`${fieldSql} > ${toLiteral(values[0], valueType)}`);
-      continue;
+    else if (op === "gt") {
+      clause = `${fieldSql} > ${toLiteral(values[0], valueType)}`;
     }
-    if (op === "gte") {
-      clauses.push(`${fieldSql} >= ${toLiteral(values[0], valueType)}`);
-      continue;
+    else if (op === "gte") {
+      clause = `${fieldSql} >= ${toLiteral(values[0], valueType)}`;
     }
-    if (op === "lt") {
-      clauses.push(`${fieldSql} < ${toLiteral(values[0], valueType)}`);
-      continue;
+    else if (op === "lt") {
+      clause = `${fieldSql} < ${toLiteral(values[0], valueType)}`;
     }
-    if (op === "lte") {
-      clauses.push(`${fieldSql} <= ${toLiteral(values[0], valueType)}`);
-      continue;
+    else if (op === "lte") {
+      clause = `${fieldSql} <= ${toLiteral(values[0], valueType)}`;
     }
-    if (op === "contains") {
-      const v = String(values[0] ?? "");
-      clauses.push(renderLike(fieldSql, `%${v}%`, true));
-      continue;
+    else if (op === "contains") {
+      const v = escapeLikePattern(String(values[0] ?? ""));
+      clause = renderLike(fieldSql, `%${v}%`, false);
     }
-    if (op === "icontains") {
-      const v = String(values[0] ?? "");
-      clauses.push(renderLike(fieldSql, `%${v}%`, true));
-      continue;
+    else if (op === "icontains") {
+      const v = escapeLikePattern(String(values[0] ?? ""));
+      clause = renderLike(fieldSql, `%${v}%`, true);
     }
-    if (op === "notcontains") {
-      const v = String(values[0] ?? "");
-      clauses.push(`NOT (${renderLike(fieldSql, `%${v}%`, true)})`);
-      continue;
+    else if (op === "notcontains") {
+      const v = escapeLikePattern(String(values[0] ?? ""));
+      clause = `NOT (${renderLike(fieldSql, `%${v}%`, false)})`;
     }
-    if (op === "noticontains") {
-      const v = String(values[0] ?? "");
-      clauses.push(`NOT (${renderLike(fieldSql, `%${v}%`, true)})`);
-      continue;
+    else if (op === "noticontains") {
+      const v = escapeLikePattern(String(values[0] ?? ""));
+      clause = `NOT (${renderLike(fieldSql, `%${v}%`, true)})`;
     }
-    if (op === "startswith") {
-      const v = String(values[0] ?? "");
-      clauses.push(renderLike(fieldSql, `${v}%`, false));
-      continue;
+    else if (op === "startswith") {
+      const v = escapeLikePattern(String(values[0] ?? ""));
+      clause = renderLike(fieldSql, `${v}%`, false);
     }
-    if (op === "istartswith") {
-      const v = String(values[0] ?? "");
-      clauses.push(renderLike(fieldSql, `${v}%`, true));
-      continue;
+    else if (op === "istartswith") {
+      const v = escapeLikePattern(String(values[0] ?? ""));
+      clause = renderLike(fieldSql, `${v}%`, true);
     }
-    if (op === "endswith") {
-      const v = String(values[0] ?? "");
-      clauses.push(renderLike(fieldSql, `%${v}`, false));
-      continue;
+    else if (op === "endswith") {
+      const v = escapeLikePattern(String(values[0] ?? ""));
+      clause = renderLike(fieldSql, `%${v}`, false);
     }
-    if (op === "iendswith") {
-      const v = String(values[0] ?? "");
-      clauses.push(renderLike(fieldSql, `%${v}`, true));
-      continue;
+    else if (op === "iendswith") {
+      const v = escapeLikePattern(String(values[0] ?? ""));
+      clause = renderLike(fieldSql, `%${v}`, true);
     }
-    if (op === "isnull") {
-      clauses.push(`${fieldSql} IS NULL`);
-      continue;
+    else if (op === "isnull") {
+      clause = `${fieldSql} IS NULL`;
     }
-    if (op === "isnotnull") {
-      clauses.push(`${fieldSql} IS NOT NULL`);
-      continue;
+    else if (op === "isnotnull") {
+      clause = `${fieldSql} IS NOT NULL`;
     }
-    if (op === "in") {
-      const lits = values.map((v) => toLiteral(v, valueType)).join(", ");
-      clauses.push(`${fieldSql} IN (${lits || "NULL"})`);
-      continue;
+    else if (op === "top_n") {
+      clause = "1 = 1";
     }
-    if (op === "not_in") {
-      const lits = values.map((v) => toLiteral(v, valueType)).join(", ");
-      clauses.push(`${fieldSql} NOT IN (${lits || "NULL"})`);
-      continue;
+    else if (op === "in") {
+      if (values.length === 0) clause = "1 = 0";
+      else {
+        const lits = values.map((v) => toLiteral(v, valueType)).join(", ");
+        clause = `${fieldSql} IN (${lits})`;
+      }
     }
-    if (op === "between") {
-      clauses.push(`${fieldSql} BETWEEN ${toLiteral(values[0], valueType)} AND ${toLiteral(values[1], valueType)}`);
-      continue;
+    else if (op === "not_in") {
+      if (values.length === 0) clause = "1 = 1";
+      else {
+        const lits = values.map((v) => toLiteral(v, valueType)).join(", ");
+        clause = `${fieldSql} NOT IN (${lits})`;
+      }
     }
-    if (op === "not_between") {
-      clauses.push(`${fieldSql} NOT BETWEEN ${toLiteral(values[0], valueType)} AND ${toLiteral(values[1], valueType)}`);
-      continue;
+    else if (op === "between") {
+      if (values.length < 2) continue;
+      clause = `${fieldSql} BETWEEN ${toLiteral(values[0], valueType)} AND ${toLiteral(values[1], valueType)}`;
     }
-
-    throw new Error(`Unsupported filter op: ${op}`);
+    else if (op === "not_between") {
+      if (values.length < 2) continue;
+      clause = `${fieldSql} NOT BETWEEN ${toLiteral(values[0], valueType)} AND ${toLiteral(values[1], valueType)}`;
+    } else {
+      throw new Error(`Unsupported filter op: ${op}`);
+    }
+    entries.push({ clause, group, logic });
   }
-
-  return clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  if (entries.length === 0) return "";
+  const groups = new Map<string, Array<{ clause: string; logic: "and" | "or" }>>();
+  for (const it of entries) {
+    const arr = groups.get(it.group) ?? [];
+    arr.push({ clause: it.clause, logic: it.logic });
+    groups.set(it.group, arr);
+  }
+  const groupClauses: string[] = [];
+  for (const [, arr] of groups.entries()) {
+    if (arr.length === 0) continue;
+    let grouped = arr[0].clause;
+    for (let i = 1; i < arr.length; i += 1) {
+      const joiner = arr[i].logic === "or" ? "OR" : "AND";
+      grouped = `${grouped} ${joiner} ${arr[i].clause}`;
+    }
+    groupClauses.push(arr.length > 1 ? `(${grouped})` : grouped);
+  }
+  return groupClauses.length ? `WHERE ${groupClauses.join(" AND ")}` : "";
 }
 
 function renderFilterCondition(
@@ -1282,11 +1327,60 @@ export function compileSemanticQuery({
     return out;
   })();
 
+  const resolveAliasedRef = (rawRef: string, rawAlias?: string): string => {
+    const direct = String(rawRef ?? "").trim();
+    if (direct) {
+      try {
+        const { model, field } = splitRef(direct);
+        const m = (semanticModel.models as any)?.[model];
+        if (m && (
+          ((m as any)?.dimensions && (m as any).dimensions[field]) ||
+          ((m as any)?.measures && (m as any).measures[field]) ||
+          ((m as any)?.calculatedMeasures && (m as any).calculatedMeasures[field]) ||
+          ((m as any)?.calculatedFields && (m as any).calculatedFields[field])
+        )) {
+          return direct;
+        }
+      } catch {}
+    }
+    const alias = String(rawAlias ?? direct).trim();
+    if (!alias) return direct;
+    const modelsObj = (semanticModel as any)?.models && typeof (semanticModel as any).models === "object" ? (semanticModel as any).models : {};
+    for (const [modelName, modelDef] of Object.entries(modelsObj as any)) {
+      const aliases = (modelDef as any)?.aliases;
+      if (!aliases || typeof aliases !== "object") continue;
+      const target = String((aliases as any)[alias] ?? "").trim();
+      if (!target) continue;
+      return target.includes(".") ? target : `${modelName}.${target}`;
+    }
+    return direct;
+  };
+  const mergedBaseFilters = mergeFilters(query?.filters, globalContext, requestContext).map((f: any) => ({
+    ...f,
+    field: resolveAliasedRef(String(f?.field ?? "").trim(), String((f as any)?.fieldAlias ?? "").trim()),
+  }));
+  const joinEdgesForReachability = buildJoinEdges(semanticModel);
+  const reachableMergedFilters = mergedBaseFilters.filter((f: any) => {
+    const ref = String(f?.field ?? "").trim();
+    if (!ref) return false;
+    return isFilterReachableFromSource(sourceModelName, ref, semanticModel, joinEdgesForReachability);
+  });
+  // #region agent log
+  fetch('http://127.0.0.1:7891/ingest/42f4b2b3-bbc6-4993-849a-db95471cb317',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6bac71'},body:JSON.stringify({sessionId:'6bac71',runId:'slicer-queryerror-run1',hypothesisId:'H3',location:'planner.ts:compileSemanticQuery',message:'filter reachability result',data:{sourceModelName,requestContext,mergedBaseFiltersCount:mergedBaseFilters.length,reachableCount:reachableMergedFilters.length,droppedCount:Math.max(0,mergedBaseFilters.length-reachableMergedFilters.length),droppedFields:mergedBaseFilters.filter((f:any)=>!reachableMergedFilters.includes(f)).map((f:any)=>String(f?.field??''))},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+  const hasExplicitTimeFilter = !!scopedTimeDimRef && reachableMergedFilters.some((f) => {
+    const ref = String(f?.field ?? "").trim();
+    if (!ref || ref !== scopedTimeDimRef) return false;
+    const op = String(f?.op ?? "").trim();
+    return op === "between" || op === "gte" || op === "lte" || op === "gt" || op === "lt" || op === "eq" || op === "neq" || op === "in" || op === "not_in";
+  });
   const filtersAll = [
-    ...mergeFilters(query?.filters, globalContext, requestContext),
-    ...dateRangeFilters,
+    ...reachableMergedFilters,
+    ...(hasExplicitTimeFilter ? [] : dateRangeFilters),
     ...rlsFilters,
   ];
+  const topNFilter = filtersAll.find((f: any) => String(f?.op ?? "").trim() === "top_n") as any;
+  const sqlFilters = filtersAll.filter((f: any) => String(f?.op ?? "").trim() !== "top_n");
 
   if (String(process.env.SEMANTIC_DEBUG ?? "").trim() === "1") {
     try {
@@ -1298,14 +1392,20 @@ export function compileSemanticQuery({
         globalFiltersCount: gf.length,
         localFiltersCount: lf.length,
         mergedFiltersCount: filtersAll.length,
-        mergedFilters: filtersAll,
+        mergedFilters: sqlFilters,
       });
     } catch {}
   }
-  for (const f of filtersAll) {
+  for (const f of sqlFilters) {
     const ref = String(f?.field ?? "").trim();
     if (!ref) continue;
     requiredModels.add(splitRef(ref).model);
+  }
+  if (topNFilter) {
+    const byMeasure = String((topNFilter as any)?.topN?.byMeasure ?? (topNFilter as any)?.values?.[1] ?? "").trim();
+    if (byMeasure) {
+      try { requiredModels.add(splitRef(byMeasure).model); } catch {}
+    }
   }
 
   const allModelAliases = new Map<string, string>();
@@ -1366,6 +1466,14 @@ export function compileSemanticQuery({
     if (ms && String(ms.sql ?? "").trim()) {
       return { expr: String(ms.sql).trim(), model: modelName, field, isMeasure: true, fieldType: "number" };
     }
+    const calcMeasure = (mDef?.calculatedMeasures as any)?.[field];
+    if (calcMeasure && String(calcMeasure.sql ?? "").trim()) {
+      return { expr: String(calcMeasure.sql).trim(), model: modelName, field, isMeasure: true, fieldType: "number" };
+    }
+    const calcField = (mDef?.calculatedFields as any)?.[field];
+    if (calcField && String(calcField.sql ?? "").trim()) {
+      return { expr: String(calcField.sql).trim(), model: modelName, field, isMeasure: true, fieldType: "number" };
+    }
     throw new Error(`Unknown field: ${ref}`);
   };
 
@@ -1417,6 +1525,13 @@ export function compileSemanticQuery({
       const info = modelSqlByRef(ref);
       return info.isMeasure ? "measure" : "dimension";
     } catch {
+      try {
+        const { model, field } = splitRef(ref);
+        const modelDef = (semanticModel.models as any)?.[safeIdent(model)];
+        if (!modelDef || typeof modelDef !== "object") return "unknown";
+        if (Object.prototype.hasOwnProperty.call((modelDef as any)?.calculatedMeasures ?? {}, field)) return "measure";
+        if (Object.prototype.hasOwnProperty.call((modelDef as any)?.calculatedFields ?? {}, field)) return "measure";
+      } catch {}
       return "unknown";
     }
   };
@@ -1443,6 +1558,7 @@ export function compileSemanticQuery({
   };
 
   const measureAliasByName = new Map<string, string>();
+  const measureSqlExprByName = new Map<string, string>();
   const addedBaseMeasureRefs = new Set<string>();
   const addBaseMeasure = (refRaw: string) => {
     const ref = String(refRaw ?? "").trim();
@@ -1469,11 +1585,16 @@ export function compileSemanticQuery({
       ? renderFilterCondition(normalizedMeasureFilters, fieldSqlByRef, dialect, fieldTypeByRef)
       : "";
 
-    selectParts.push(`${wrapAggWithCondition(type, expr, condSql, dialect)} as ${alias}`);
+    const aggExpr = wrapAggWithCondition(type, expr, condSql, dialect);
+    selectParts.push(`${aggExpr} as ${alias}`);
     allowedOrderAliases.add(alias);
     measureAliasByName.set(`${modelName}.${field}`, alias);
+    measureSqlExprByName.set(`${modelName}.${field}`, aggExpr);
     if (!measureAliasByName.has(field)) {
       measureAliasByName.set(field, alias);
+    }
+    if (!measureSqlExprByName.has(field)) {
+      measureSqlExprByName.set(field, aggExpr);
     }
     addedBaseMeasureRefs.add(ref);
   };
@@ -1490,6 +1611,11 @@ export function compileSemanticQuery({
   // time dimension bucket (optional)
   if (timeDimRef && !requestedDimensionSet.has(timeDimRef)) {
     projectDimensionRef(timeDimRef, { useTimeBucket: true });
+  }
+
+  if (topNFilter) {
+    const byMeasure = String((topNFilter as any)?.topN?.byMeasure ?? (topNFilter as any)?.values?.[1] ?? "").trim();
+    if (byMeasure) addBaseMeasure(byMeasure);
   }
 
   for (const m of baseMeasuresRequested) {
@@ -1599,7 +1725,7 @@ export function compileSemanticQuery({
 
   const whereFilters: LogicalFilter[] = [];
   const havingFilters: LogicalFilter[] = [];
-  for (const f of filtersAll) {
+  for (const f of sqlFilters) {
     const kind = fieldKindByRef(String(f?.field ?? ""));
     if (kind === "measure") havingFilters.push(f);
     else whereFilters.push(f);
@@ -1609,7 +1735,9 @@ export function compileSemanticQuery({
     if ((query as any)?.filterNullDimensions !== true || dimensions.length === 0) return whereBase;
     const extraClauses = Array.from(new Set(dimensions.map((d) => String(d ?? "").trim()).filter(Boolean))).map((ref) => {
       const expr = dimSqlByRef(ref);
-      const textExpr = dialect === "clickhouse" ? `toString(${expr})` : `CAST(${expr} AS TEXT)`;
+      const textExpr = dialect === "clickhouse"
+        ? `toString(${expr})`
+        : (dialect === "mssql" ? `CAST(${expr} AS NVARCHAR(MAX))` : `CAST(${expr} AS TEXT)`);
       return `(${expr} IS NOT NULL AND ${textExpr} <> '')`;
     });
     if (extraClauses.length === 0) return whereBase;
@@ -1619,9 +1747,50 @@ export function compileSemanticQuery({
   })();
   const groupByDedup = Array.from(new Set(groupByParts));
   const groupBy = groupByDedup.length ? `GROUP BY ${groupByDedup.join(", ")}` : "";
-  const having = renderFilterCondition(havingFilters, fieldSqlByRef, dialect, fieldTypeByRef);
+  const havingFieldSqlByRef = (ref: string) => {
+    const aggExpr = measureSqlExprByName.get(String(ref ?? "").trim());
+    if (aggExpr) return aggExpr;
+    try {
+      const { field } = splitRef(String(ref ?? ""));
+      const byFieldExpr = measureSqlExprByName.get(field);
+      if (byFieldExpr) return byFieldExpr;
+    } catch {}
+    const alias = measureAliasByName.get(String(ref ?? "").trim());
+    if (alias) return alias;
+    try {
+      const { field } = splitRef(String(ref ?? ""));
+      const byField = measureAliasByName.get(field);
+      if (byField) return byField;
+    } catch {}
+    return fieldSqlByRef(ref);
+  };
+  const having = renderFilterCondition(havingFilters, havingFieldSqlByRef, dialect, fieldTypeByRef);
+
+  const topNConfig = (() => {
+    if (!topNFilter) return null as null | { n: number; mode: "top" | "bottom"; byMeasure: string };
+    const nRaw = Number((topNFilter as any)?.topN?.n ?? (topNFilter as any)?.values?.[0] ?? 10);
+    const n = Math.max(1, Number.isFinite(nRaw) ? Math.floor(nRaw) : 10);
+    const mode = String((topNFilter as any)?.topN?.mode ?? (topNFilter as any)?.values?.[2] ?? "top").trim() === "bottom" ? "bottom" : "top";
+    const byMeasure = String((topNFilter as any)?.topN?.byMeasure ?? (topNFilter as any)?.values?.[1] ?? "").trim();
+    return byMeasure ? { n, mode, byMeasure } : null;
+  })();
 
   const orderBy = (() => {
+    if (topNConfig) {
+      const alias = measureAliasByName.get(topNConfig.byMeasure)
+        || (() => {
+          try {
+            const { field } = splitRef(topNConfig.byMeasure);
+            return measureAliasByName.get(field);
+          } catch {
+            return "";
+          }
+        })()
+        || "";
+      if (alias) {
+        return `ORDER BY ${alias} ${topNConfig.mode === "bottom" ? "ASC" : "DESC"}`;
+      }
+    }
     const arr = Array.isArray((query as any)?.orderBy) ? (query as any).orderBy : [];
     if (!arr.length) {
       let firstMeasureAlias = "";
@@ -1659,7 +1828,8 @@ export function compileSemanticQuery({
     return parts.length ? `ORDER BY ${parts.join(", ")}` : "";
   })();
 
-  const limit = Math.max(1, Math.min(50_000, Number(query?.limit ?? 500) || 500));
+  const baseLimit = Math.max(1, Math.min(50_000, Number(query?.limit ?? 500) || 500));
+  const limit = topNConfig ? Math.min(baseLimit, topNConfig.n) : baseLimit;
   const offset = Math.max(0, Number((query as any)?.offset ?? 0) || 0);
   const limitClause = dialect === "mssql" ? "" : `LIMIT ${limit}`;
   const offsetClause = (dialect === "mssql" || offset <= 0) ? "" : `OFFSET ${offset}`;
@@ -1736,15 +1906,16 @@ export function compileSemanticQuery({
     return parts.join(" ");
   })();
 
-  const baseSql = `SELECT ${topClause}${selectParts.join(", ")} ${fromClause} ${where} ${groupBy} ${having ? `HAVING ${having}` : ""} ${orderByEffective} ${limitClause} ${offsetClause} ${mssqlPagingClause}`.trim();
+  const baseSqlCore = `SELECT ${topClause}${selectParts.join(", ")} ${fromClause} ${where} ${groupBy} ${having ? `HAVING ${having}` : ""} ${orderByEffective}`.trim();
+  const baseSql = `${baseSqlCore} ${limitClause} ${offsetClause} ${mssqlPagingClause}`.trim();
 
   if (calcMeasuresRequested.length === 0 && deferredWindowCalcs.length === 0) {
     return {
       sql: baseSql,
-      connectionId,
+      connectionId: effectiveConnectionId,
       connectionType: (bound as any)?.connectionType,
       debug: {
-        mergedFilters: filtersAll,
+        mergedFilters: sqlFilters,
         filterPlacement: {
           where: whereFilters,
           having: havingFilters,
@@ -1798,20 +1969,22 @@ export function compileSemanticQuery({
     }
   }
 
-  const outerSqlBase = `SELECT ${outerSelectParts.join(", ")} FROM (${baseSql}) t`.trim();
-  const outerSql = deferredWindowCalcs.length
+  const uniqueOuterSelectParts = Array.from(new Set(outerSelectParts.map((p) => String(p).trim()).filter(Boolean)));
+  const outerSqlBase = `SELECT ${uniqueOuterSelectParts.join(", ")} FROM (${baseSqlCore}) t`.trim();
+  const outerSqlNoPaging = deferredWindowCalcs.length
     ? wrapWithWindowLayer({
         innerSql: outerSqlBase,
         windowExprs: deferredWindowCalcs.map((d) => ({ alias: d.alias, sql: d.sqlExpr })),
       })
     : outerSqlBase;
+  const outerSql = `${outerSqlNoPaging} ${limitClause} ${offsetClause} ${mssqlPagingClause}`.trim();
 
   return {
     sql: outerSql,
-    connectionId,
+    connectionId: effectiveConnectionId,
     connectionType: (bound as any)?.connectionType,
     debug: {
-      mergedFilters: filtersAll,
+      mergedFilters: sqlFilters,
       filterPlacement: {
         where: whereFilters,
         having: havingFilters,

@@ -21,7 +21,11 @@ import {
 } from "../../lib/canvasBackgroundStorage";
 import { loadBackgroundMedia } from "../../lib/backgroundMediaStorage";
 import { classifyFieldRef, uiAggToAggFn } from "../../lib/semantic/fieldClassifier";
+import { defaultAggForMeasureType, isNumericSqlType } from "../../lib/chart/sqlTypePhysicalKind";
 import { useGlobalFilters } from "../../store/globalFiltersContext";
+import { useBiFilters } from "../../store/biFiltersContext";
+import { useVisualInteractions } from "../../store/visualInteractionsContext";
+import { dashboardEventBus } from "../../lib/dashboardEventBus";
 
 interface CanvasNode {
   id: string;
@@ -41,12 +45,22 @@ interface DragDropCanvasProps {
 
 export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropCanvasProps) {
   const { setDateRange } = useGlobalFilters();
+  const { filters: biFilters } = useBiFilters();
+  const { visualInteractions, setVisualInteractions } = useVisualInteractions();
   const [nodes, setNodes] = useState<CanvasNode[]>([]);
+  const projectIdRef = useRef<string>("");
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const activeNodeIdRef = useRef<string | null>(null);
   activeNodeIdRef.current = activeNodeId;
 
   const [semanticArtifacts, setSemanticArtifacts] = useState<any>(null);
+  const semanticArtifactsForProject = useMemo(() => {
+    const base = (semanticArtifacts && typeof semanticArtifacts === "object") ? semanticArtifacts : {};
+    return {
+      ...base,
+      visualInteractions: visualInteractions ?? {},
+    };
+  }, [semanticArtifacts, visualInteractions]);
 
   useEffect(() => {
     try {
@@ -87,12 +101,21 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  const projectChangeVersionRef = useRef(0);
 
   useEffect(() => {
+    projectIdRef.current = String(projectId ?? "").trim();
+  }, [projectId]);
+
+  useEffect(() => {
+    projectChangeVersionRef.current += 1;
     try {
       window.dispatchEvent(
         new CustomEvent("dashboard:project-changed", {
-          detail: { projectId: projectId ? String(projectId) : null },
+          detail: {
+            projectId: projectId ? String(projectId) : null,
+            version: projectChangeVersionRef.current,
+          },
         })
       );
     } catch {}
@@ -149,13 +172,17 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
           const statusRes = await fetch("/api/connection/status", { cache: "no-store" }).catch(() => null);
           const statusJson = statusRes ? await statusRes.json().catch(() => ({})) : {};
           const connectionId = String(statusJson?.connection?.id ?? "").trim();
-
-          await fetch("/api/semantic/bootstrap", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ projectId: pid, ...(connectionId ? { connectionId } : {}) }),
-            cache: "no-store",
-          }).catch(() => null);
+          let attempt = 0;
+          while (attempt < 2) {
+            const res = await fetch("/api/semantic/bootstrap", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ projectId: pid, ...(connectionId ? { connectionId } : {}) }),
+              cache: "no-store",
+            }).catch(() => null);
+            if (res && res.ok) break;
+            attempt += 1;
+          }
         }
       } catch {}
     })();
@@ -335,9 +362,10 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
       if (!key) return;
       const raw = window.localStorage.getItem(key);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as Partial<CanvasNode>[];
-      if (Array.isArray(parsed)) {
-        const normalized: CanvasNode[] = parsed.map((n, i) => ({
+      const parsed = JSON.parse(raw) as any;
+      const parsedNodes = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.nodes) ? parsed.nodes : []);
+      if (Array.isArray(parsedNodes)) {
+        const normalized: CanvasNode[] = parsedNodes.map((n: any, i: number) => ({
           id: String(n.id ?? `node-${Date.now()}-${i}`),
           type: String(n.type ?? n?.name ?? 'Unknown'),
           name: String(n.name ?? 'Untitled'),
@@ -346,18 +374,38 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
           size: n.size ?? { width: 560, height: 360 },
           data: n.data ?? {},
         }));
-
         setNodes(normalized);
         setActiveNodeId(null);
       }
+      const viewport = (!Array.isArray(parsed) && parsed && typeof parsed === "object") ? parsed.viewport : null;
+      const parsedVisualInteractions = (!Array.isArray(parsed) && parsed && typeof parsed === "object" && parsed.visualInteractions && typeof parsed.visualInteractions === "object")
+        ? parsed.visualInteractions
+        : null;
+      if (parsedVisualInteractions) {
+        setVisualInteractions(parsedVisualInteractions);
+      }
+      const nextPan = viewport && typeof viewport === "object" ? (viewport as any).pan : null;
+      const nextZoom = viewport && typeof viewport === "object" ? (viewport as any).zoom : null;
+      if (nextPan && typeof nextPan.x === "number" && typeof nextPan.y === "number") {
+        setPan({ x: nextPan.x, y: nextPan.y });
+      }
+      if (typeof nextZoom === "number" && Number.isFinite(nextZoom)) {
+        setZoom(Math.min(3, Math.max(0.1, nextZoom)));
+      }
     } catch {}
-  }, [storageKey]);
+  }, [storageKey, setVisualInteractions]);
 
   // Load a saved project (Home → My Projects) into this canvas
   useEffect(() => {
     if (!projectId) return;
+    // #region agent log
+    fetch('http://127.0.0.1:7891/ingest/42f4b2b3-bbc6-4993-849a-db95471cb317',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6c3890'},body:JSON.stringify({sessionId:'6c3890',runId:'home-new-project-bug',hypothesisId:'H2',location:'DragDropCanvas.tsx:loadProjectEffect',message:'Project load effect triggered',data:{projectId:String(projectId??''),storageKey:String(storageKey??'')},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     (async () => {
       const p = await loadProject(projectId);
+      // #region agent log
+      fetch('http://127.0.0.1:7891/ingest/42f4b2b3-bbc6-4993-849a-db95471cb317',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6c3890'},body:JSON.stringify({sessionId:'6c3890',runId:'home-new-project-bug',hypothesisId:'H2',location:'DragDropCanvas.tsx:loadProjectEffect',message:'Project load result',data:{projectId:String(projectId??''),loaded:Boolean(p),nodesCount:Array.isArray((p as any)?.nodes)?(p as any).nodes.length:null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (!p) return;
 
       const parsed = Array.isArray(p.nodes) ? (p.nodes as Partial<CanvasNode>[]) : [];
@@ -374,7 +422,28 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
       setNodes(normalized);
       setActiveNodeId(null);
 
-      setSemanticArtifacts((p as any)?.semanticArtifacts ?? null);
+      setSemanticArtifacts((p as any)?.semanticArtifacts ?? (p as any)?.semantic_artifacts ?? null);
+      const projectVisualInteractions = (p as any)?.visualInteractions
+        ?? (p as any)?.visual_interactions
+        ?? (p as any)?.semanticArtifacts?.visualInteractions
+        ?? (p as any)?.semantic_artifacts?.visualInteractions
+        ?? null;
+      if (projectVisualInteractions && typeof projectVisualInteractions === "object") {
+        setVisualInteractions(projectVisualInteractions);
+      } else {
+        setVisualInteractions({});
+      }
+      try {
+        window.dispatchEvent(
+          new CustomEvent("dashboard:bi-filters-changed", {
+            detail: {
+              filters: Array.isArray((p as any)?.biFilters) ? (p as any).biFilters : [],
+              version: Date.now(),
+              projectId: String(projectId ?? "").trim(),
+            },
+          })
+        );
+      } catch {}
 
       const nextPan = (p.viewport && typeof p.viewport === 'object') ? (p.viewport as any).pan : null;
       const nextZoom = (p.viewport && typeof p.viewport === 'object') ? (p.viewport as any).zoom : null;
@@ -385,7 +454,7 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
         setZoom(Math.min(3, Math.max(0.1, nextZoom)));
       }
     })();
-  }, [projectId]);
+  }, [projectId, setVisualInteractions]);
 
   useEffect(() => {
     try {
@@ -397,16 +466,60 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
           detail: { chartId, chartData, activeTabId: activeTabId ? String(activeTabId) : null },
         })
       );
+      dashboardEventBus.publish("activeChartChanged", {
+        chartId,
+        chartData,
+        activeTabId: activeTabId ? String(activeTabId) : null,
+      });
     } catch {}
   }, [activeNodeId, nodes, activeTabId]);
+
+  useEffect(() => {
+    const handler = () => {
+      try {
+        const chartId = activeNodeIdRef.current ? String(activeNodeIdRef.current) : null;
+        const node = chartId ? nodesRef.current.find((n) => n.id === chartId) : null;
+        const chartData = (node && node.data && typeof node.data === "object") ? node.data : null;
+        window.dispatchEvent(
+          new CustomEvent("dashboard:active-chart-id", {
+            detail: { chartId, chartData, activeTabId: activeTabId ? String(activeTabId) : null },
+          })
+        );
+      } catch {}
+    };
+    window.addEventListener("dashboard:request-active-chart", handler as EventListener);
+    return () => window.removeEventListener("dashboard:request-active-chart", handler as EventListener);
+  }, [activeTabId]);
 
   useEffect(() => {
     try {
       const key = typeof storageKey === "string" ? storageKey : "";
       if (!key) return;
-      window.localStorage.setItem(key, JSON.stringify(nodes));
+      window.localStorage.setItem(key, JSON.stringify({
+        nodes,
+        viewport: { pan, zoom },
+        visualInteractions,
+      }));
     } catch {}
-  }, [nodes, storageKey]);
+  }, [nodes, storageKey, pan, zoom, visualInteractions]);
+
+  // If a visual-scoped slicer lost its linked chart, degrade it to report scope.
+  useEffect(() => {
+    const ids = new Set(nodes.map((n) => String(n.id)));
+    let changed = false;
+    const next = nodes.map((n) => {
+      const data = n?.data && typeof n.data === "object" ? (n.data as any) : null;
+      if (!data) return n;
+      const scope = String(data.__slicerBiScope ?? "").trim().toLowerCase();
+      const linked = String(data.__sourceChartId ?? "").trim();
+      if (scope !== "visual" || !linked || ids.has(linked)) return n;
+      changed = true;
+      const patchedData = { ...data, __slicerBiScope: "report" } as any;
+      delete patchedData.__sourceChartId;
+      return { ...n, data: patchedData };
+    });
+    if (changed) setNodes(next);
+  }, [nodes]);
 
   // Track canvas size for minimap
   useEffect(() => {
@@ -513,11 +626,60 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
       // IMPORTANT: apply semanticModelId/logicalQuery directly into the node patch. Do NOT rely on nested dispatch,
       // otherwise it can race with the setNodes update and never persist.
       const patchWithSemantic: any = { ...patch };
+      const mergeNodeDataPatch = (prevData: any, nextPatch: any) => {
+        const mergedLogicalQuery = (
+          (nextPatch?.logicalQuery && typeof nextPatch.logicalQuery === "object")
+            ? {
+                ...((prevData as any)?.logicalQuery && typeof (prevData as any).logicalQuery === "object"
+                  ? (prevData as any).logicalQuery
+                  : {}),
+                ...nextPatch.logicalQuery,
+              }
+            : undefined
+        );
+        const mergedSlicer = (
+          (nextPatch?.slicer && typeof nextPatch.slicer === "object")
+            ? {
+                ...((prevData as any)?.slicer && typeof (prevData as any).slicer === "object"
+                  ? (prevData as any).slicer
+                  : {}),
+                ...nextPatch.slicer,
+              }
+            : undefined
+        );
+        const prevChartConfig = ((prevData as any)?.chartConfig && typeof (prevData as any).chartConfig === "object")
+          ? (prevData as any).chartConfig
+          : {};
+        const nextChartConfig = (nextPatch?.chartConfig && typeof nextPatch.chartConfig === "object")
+          ? nextPatch.chartConfig
+          : null;
+        const mergedChartConfig = nextChartConfig
+          ? {
+              ...prevChartConfig,
+              ...nextChartConfig,
+              general: {
+                ...((prevChartConfig as any)?.general && typeof (prevChartConfig as any).general === "object"
+                  ? (prevChartConfig as any).general
+                  : {}),
+                ...((nextChartConfig as any)?.general && typeof (nextChartConfig as any).general === "object"
+                  ? (nextChartConfig as any).general
+                  : {}),
+              },
+            }
+          : undefined;
+        return {
+          ...prevData,
+          ...nextPatch,
+          ...(mergedLogicalQuery ? { logicalQuery: mergedLogicalQuery } : {}),
+          ...(mergedSlicer ? { slicer: mergedSlicer } : {}),
+          ...(mergedChartConfig ? { chartConfig: mergedChartConfig } : {}),
+        };
+      };
       try {
-        const pid = String(projectId ?? "").trim();
+        const pid = String(projectIdRef.current ?? "").trim();
         const mappingPatch = Object.prototype.hasOwnProperty.call(patch, "columnMapping") ? (patch as any).columnMapping : null;
-        const isDbTablePatch = Object.prototype.hasOwnProperty.call(patch, "kind") ? String((patch as any).kind) === "db-table" : false;
-        if (pid && mappingPatch && typeof mappingPatch === "object" && isDbTablePatch) {
+        const hasLogicalQueryPatch = Object.prototype.hasOwnProperty.call(patch, "logicalQuery");
+        if (pid && mappingPatch && typeof mappingPatch === "object" && !hasLogicalQueryPatch) {
           void (async () => {
             try {
               const bindingRes = await fetch(`/api/semantic/binding?projectId=${encodeURIComponent(pid)}`, { cache: "no-store" });
@@ -708,7 +870,7 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
                 __semanticBindingMissing: false,
               };
 
-              // Apply semantic patch to nodes directly.
+              // Apply semantic patch to nodes directly (single authoritative merge).
               setNodes((prev) =>
                 prev.map((n) => {
                   if (n.id !== chartId) return n;
@@ -719,18 +881,21 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
                   if (patchTime === undefined && prevTime !== undefined) {
                     (semanticPatch.logicalQuery as any).time = prevTime;
                   }
-                  return { ...n, data: { ...prevData, ...patch, ...semanticPatch } };
-                })
-              );
-
-              // Keep panels in sync.
-              window.dispatchEvent(
-                new CustomEvent("dashboard:update-chart-data", {
-                  detail: { chartId, patch: semanticPatch },
+                  const mergedPatch = { ...patch, ...semanticPatch } as any;
+                  const merged = mergeNodeDataPatch(prevData, mergedPatch);
+                  const nextName = String(mergedPatch?.name ?? "").trim();
+                  const nextTitle = String(mergedPatch?.title ?? "").trim();
+                  return {
+                    ...n,
+                    ...(nextName ? { name: nextName } : {}),
+                    ...(nextTitle ? { title: nextTitle } : {}),
+                    data: merged,
+                  };
                 })
               );
             } catch {}
           })();
+          return; // async path handles the full merge, avoid duplicate setNodes
         }
       } catch {}
 
@@ -740,14 +905,12 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
           const prevData = (n.data && typeof n.data === "object") ? n.data : {};
           const nextName = String((patchWithSemantic as any)?.name ?? "").trim();
           const nextTitle = String((patchWithSemantic as any)?.title ?? "").trim();
+          const merged = mergeNodeDataPatch(prevData, patchWithSemantic);
           return {
             ...n,
             ...(nextName ? { name: nextName } : {}),
             ...(nextTitle ? { title: nextTitle } : {}),
-            data: {
-              ...prevData,
-              ...patchWithSemantic,
-            },
+            data: merged,
           };
         })
       );
@@ -841,7 +1004,12 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
         const sourceNode = prev.find((n) => n.id === chartId);
         if (!sourceNode) return prev;
 
-        const tableNodeId = `table-${chartId}-${Date.now()}`;
+        const tableNodeId = (() => {
+          if (typeof globalThis !== "undefined" && (globalThis as any)?.crypto && typeof (globalThis as any).crypto.randomUUID === "function") {
+            return `table-${chartId}-${(globalThis as any).crypto.randomUUID()}`;
+          }
+          return `table-${chartId}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        })();
         const sourceData = sourceNode.data && typeof sourceNode.data === "object" ? sourceNode.data : {};
 
         const tableNode: CanvasNode = {
@@ -881,9 +1049,30 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
         const sourceNode = prev.find((n) => n.id === chartId);
         if (!sourceNode) return prev;
 
-        const slicerNodeId = `slicer-${chartId}-${Date.now()}`;
+        const slicerNodeId = (() => {
+          if (typeof globalThis !== "undefined" && (globalThis as any)?.crypto && typeof (globalThis as any).crypto.randomUUID === "function") {
+            return `slicer-${chartId}-${(globalThis as any).crypto.randomUUID()}`;
+          }
+          return `slicer-${chartId}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        })();
         const sourceData = sourceNode.data && typeof sourceNode.data === "object" ? sourceNode.data : {};
 
+        const sourceMapping = (sourceData as any)?.columnMapping && typeof (sourceData as any).columnMapping === "object"
+          ? (sourceData as any).columnMapping
+          : {};
+        const sourceLogicalQuery = (sourceData as any)?.logicalQuery && typeof (sourceData as any).logicalQuery === "object"
+          ? (sourceData as any).logicalQuery
+          : {};
+        const firstLogicalDimension = Array.isArray((sourceLogicalQuery as any)?.dimensions)
+          ? String((sourceLogicalQuery as any).dimensions.find((d: any) => String(d ?? "").trim()) ?? "").trim()
+          : "";
+        const extractedField = String(
+          firstLogicalDimension
+            ?? sourceMapping?.xColumn
+            ?? sourceMapping?.groupBy
+            ?? sourceMapping?.category
+            ?? ""
+        ).trim();
         const slicerNode: CanvasNode = {
           id: slicerNodeId,
           type: "Slicer",
@@ -895,8 +1084,17 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
           },
           size: { width: 320, height: 360 },
           data: {
-            ...sourceData,
             __sourceChartId: chartId,
+            __slicerBiScope: "visual",
+            kind: "slicer",
+            slicer: {
+              fieldRef: extractedField || undefined,
+              mode: "list",
+              multiSelect: true,
+              selectedValues: [],
+            },
+            ...(sourceData?.connectionId ? { connectionId: sourceData.connectionId } : {}),
+            ...(sourceData?.tableKey ? { tableKey: sourceData.tableKey } : {}),
           },
         };
 
@@ -971,7 +1169,9 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
             pan,
             zoom,
           },
-          semanticArtifacts,
+          semanticArtifacts: semanticArtifactsForProject,
+          biFilters,
+          ...(visualInteractions ? { visualInteractions: visualInteractions as any } : {}),
         });
 
         if (!projectId) return;
@@ -1000,7 +1200,23 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
 
     window.addEventListener("dashboard:save-project", handler as EventListener);
     return () => window.removeEventListener("dashboard:save-project", handler as EventListener);
-  }, [nodes, pan, zoom, semanticArtifacts]);
+  }, [nodes, pan, zoom, semanticArtifactsForProject, biFilters, visualInteractions]);
+
+  // Auto-save existing projects to server with debounce.
+  useEffect(() => {
+    const pid = String(projectId ?? "").trim();
+    if (!pid) return;
+    const timer = window.setTimeout(() => {
+      void updateProject(pid, {
+        nodes,
+        viewport: { pan, zoom },
+        semanticArtifacts: semanticArtifactsForProject,
+        biFilters,
+        ...(visualInteractions ? { visualInteractions: visualInteractions as any } : {}),
+      });
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [projectId, nodes, pan, zoom, semanticArtifactsForProject, biFilters, visualInteractions]);
 
   const handleSaveConfig = useCallback(
     (config: ChartConfig) => {
@@ -1156,8 +1372,15 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
       return;
     }
 
+    const newNodeId = (() => {
+      if (typeof globalThis !== "undefined" && (globalThis as any)?.crypto && typeof (globalThis as any).crypto.randomUUID === "function") {
+        return `node-${(globalThis as any).crypto.randomUUID()}`;
+      }
+      return `node-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    })();
+
     const newNode: CanvasNode = {
-      id: `node-${Date.now()}`,
+      id: newNodeId,
       type: chart.name,
       name: chart.name,
       title: chart.name,
@@ -1168,6 +1391,7 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
         ...(chart?.name === "Slicer"
           ? {
               kind: "slicer",
+              __slicerBiScope: "report",
               slicer: {
                 mode: "list",
                 multiSelect: true,
@@ -1229,7 +1453,12 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
         const y = (e.clientY - rect.top - pan.y) / zoom;
 
         setNodes((prev) => {
-          const nodeId = `param-slicer-${parameterId}-${Date.now()}`;
+          const nodeId = (() => {
+            if (typeof globalThis !== "undefined" && (globalThis as any)?.crypto && typeof (globalThis as any).crypto.randomUUID === "function") {
+              return `param-slicer-${parameterId}-${(globalThis as any).crypto.randomUUID()}`;
+            }
+            return `param-slicer-${parameterId}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+          })();
           const slicerNode: CanvasNode = {
             id: nodeId,
             type: "Slicer",
@@ -1238,6 +1467,7 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
             position: { x: Math.round(x), y: Math.round(y) },
             size: { width: 320, height: 360 },
             data: {
+              kind: "slicer",
               slicer: {
                 mode: "list",
                 sourceKind: "parameter",
@@ -1252,7 +1482,14 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
         return;
       }
 
-      if (payload && typeof payload === "object" && payload.kind === "semantic-field-parameter") {
+      if (
+        payload &&
+        typeof payload === "object" &&
+        (
+          payload.kind === "semantic-field-parameter" ||
+          (payload.kind === "semantic-field" && String((payload as any).fieldParameterId ?? "").trim())
+        )
+      ) {
         const fieldParameterId = String((payload as any).fieldParameterId ?? (payload as any).id ?? "").trim();
         const fpName = String((payload as any).name ?? fieldParameterId).trim() || fieldParameterId;
         if (!fieldParameterId) return;
@@ -1267,7 +1504,12 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
         const y = (e.clientY - rect.top - pan.y) / zoom;
 
         setNodes((prev) => {
-          const nodeId = `fp-slicer-${fieldParameterId}-${Date.now()}`;
+          const nodeId = (() => {
+            if (typeof globalThis !== "undefined" && (globalThis as any)?.crypto && typeof (globalThis as any).crypto.randomUUID === "function") {
+              return `fp-slicer-${fieldParameterId}-${(globalThis as any).crypto.randomUUID()}`;
+            }
+            return `fp-slicer-${fieldParameterId}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+          })();
           const slicerNode: CanvasNode = {
             id: nodeId,
             type: "Slicer",
@@ -1276,6 +1518,7 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
             position: { x: Math.round(x), y: Math.round(y) },
             size: { width: 320, height: 360 },
             data: {
+              kind: "slicer",
               __sourceChartId: targetChartId,
               slicer: {
                 mode: "dropdown",
@@ -1424,9 +1667,32 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
               nextData.connectionType = String(dataSource.connectionType);
             }
 
+            const prevTableKey = String((prevData as any)?.tableKey ?? "").trim();
+            const incomingTk = String(dataSource?.tableKey ?? "").trim();
+            if (prevTableKey && incomingTk && prevTableKey !== incomingTk) {
+              delete (nextData as any).columnMapping;
+              delete (nextData as any).logicalQuery;
+              delete (nextData as any).__semanticBindingMissing;
+              // #region agent log
+              fetch("http://127.0.0.1:7891/ingest/42f4b2b3-bbc6-4993-849a-db95471cb317", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6bac71" },
+                body: JSON.stringify({
+                  sessionId: "6bac71",
+                  runId: "post-fix",
+                  hypothesisId: "H9",
+                  location: "DragDropCanvas.tsx:connect-to-chart",
+                  message: "reset mapping/logicalQuery on tableKey change",
+                  data: { chartId, prevTableKey, incomingTk },
+                  timestamp: Date.now(),
+                }),
+              }).catch(() => {});
+              // #endregion
+            }
+
             // Auto-init column mapping (Build) so X/Y are populated immediately after Connect DB.
             // Only do it if mapping is missing or empty.
-            const existingMapping = (prevData as any)?.columnMapping;
+            const existingMapping = (nextData as any)?.columnMapping;
             const hasExistingMapping = existingMapping && typeof existingMapping === "object" && (
               String((existingMapping as any)?.xColumn ?? "").trim() ||
               (Array.isArray((existingMapping as any)?.yColumns) && (existingMapping as any).yColumns.length > 0)
@@ -1436,9 +1702,7 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
               const cols = colsMeta
                 .map((c: any) => ({ name: String(c?.name ?? "").trim(), type: String(c?.type ?? "").toLowerCase() }))
                 .filter((c: any) => c.name);
-              const isNumeric = (t: string) => {
-                return t.includes("int") || t.includes("decimal") || t.includes("numeric") || t.includes("real") || t.includes("double") || t.includes("float") || t.includes("number");
-              };
+              const isNumeric = (t: string) => isNumericSqlType(t);
               const isDateLike = (t: string, n: string) => {
                 const nn = n.toLowerCase();
                 return t.includes("date") || t.includes("time") || nn.includes("date") || nn.includes("time") || nn === "ts" || nn.includes("timestamp");
@@ -1487,15 +1751,24 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
                 || cols[0];
 
               const xName = xCandidate?.name ? String(xCandidate.name) : "";
-              const yCandidate = numericMeasureLike.find((c: any) => String(c?.name ?? "") && String(c.name) !== xName)
+              const yFromNumeric = numericMeasureLike.find((c: any) => String(c?.name ?? "") && String(c.name) !== xName)
                 || numericMeasureLike[0]
                 || null;
 
               const xColumn = xName;
-              const yColumn = yCandidate?.name ? String(yCandidate.name) : "";
+              let yPick: { name: string; type: string } | null = yFromNumeric;
+              let yColumn = yPick?.name ? String(yPick.name) : "";
+              if (!yColumn) {
+                const fallback = cols.find((c: any) => c.name && String(c.name) !== xName);
+                if (fallback) {
+                  yPick = fallback;
+                  yColumn = String(fallback.name);
+                }
+              }
+              const yAgg = yPick ? defaultAggForMeasureType(yPick.type) : "SUM";
               nextData.columnMapping = {
                 xColumn,
-                yColumns: yColumn ? [{ col: yColumn, agg: "SUM" }] : [],
+                yColumns: yColumn ? [{ col: yColumn, agg: yAgg }] : [],
               };
             }
 
@@ -1520,12 +1793,17 @@ export function DragDropCanvas({ storageKey, projectId, activeTabId }: DragDropC
                     let { semanticModelId, modelJson, isDemo } = await fetchBinding();
                     if (!semanticModelId || !modelJson || typeof modelJson !== "object" || isDemo) {
                       const connectionId = String((dataSource as any)?.connectionId ?? "").trim() || String((nextData as any)?.connectionId ?? "").trim();
-                      await fetch("/api/semantic/bootstrap", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ projectId: pid, ...(connectionId ? { connectionId } : {}) }),
-                        cache: "no-store",
-                      }).catch(() => null);
+                      let attempt = 0;
+                      while (attempt < 2) {
+                        const res = await fetch("/api/semantic/bootstrap", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ projectId: pid, ...(connectionId ? { connectionId } : {}) }),
+                          cache: "no-store",
+                        }).catch(() => null);
+                        if (res && res.ok) break;
+                        attempt += 1;
+                      }
 
                       ({ semanticModelId, modelJson, isDemo } = await fetchBinding());
                     }

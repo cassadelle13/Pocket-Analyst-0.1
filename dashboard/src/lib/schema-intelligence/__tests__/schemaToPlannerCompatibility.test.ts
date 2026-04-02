@@ -1,6 +1,7 @@
 import { SchemaIntelligenceService } from "../SchemaIntelligenceService";
 import { compileSemanticQuery } from "../../semantic/planner";
 import type { LogicalQuery } from "../../semantic/types";
+import { test } from "vitest";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -45,4 +46,6 @@ function main() {
   console.log("schema -> planner compatibility suite: OK");
 }
 
-main();
+test("schema to planner compatibility suite", () => {
+  main();
+});

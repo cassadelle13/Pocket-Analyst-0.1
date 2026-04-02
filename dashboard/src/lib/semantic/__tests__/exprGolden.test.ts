@@ -1,4 +1,5 @@
 import { buildExprContextForPipelineStep, getCompletions, getEditorDiagnostics, getExecutionType, resolveComputeGraph } from "../expressionEngine";
+import { test } from "vitest";
 
 type GoldenCase = {
   name: string;
@@ -426,4 +427,6 @@ function main() {
   console.log("expr golden suite: OK");
 }
 
-main();
+test("expr golden suite", () => {
+  main();
+});

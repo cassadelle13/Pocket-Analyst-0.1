@@ -1,24 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { pickDefaultConnection } from "../../../../lib/defaultConnectionPick";
 import { createSemanticModel, getDataTalkMetaPool, getSemanticModelBinding, getSemanticModelById, listConnections, updateSemanticModel, upsertSemanticModelBinding } from "../../../../lib/datatalkMetaDb";
 import { normalizeSemanticModelV1, validateSemanticModelV1 } from "../../../../lib/semantic/validator";
 import type { SemanticModelV1 } from "../../../../lib/semantic/types";
 import { SchemaIntelligenceService } from "../../../../lib/schema-intelligence";
 
 function pickDefaultConnectionId(connections: Array<{ id: string; name: string }> | null | undefined): string {
-  const arr = Array.isArray(connections) ? connections : [];
-  const preferredName = String(process.env.DATATALK_DEFAULT_CONNECTION_NAME ?? "").trim();
-  const byNameCi = (name: string) =>
-    arr.find((c) => String(c.name ?? "").trim().toLowerCase() === name.trim().toLowerCase());
-  const byNameContainsCi = (part: string) =>
-    arr.find((c) => String(c.name ?? "").trim().toLowerCase().includes(part.trim().toLowerCase()));
-  const picked =
-    (preferredName ? byNameCi(preferredName) : null) ??
-    byNameCi("MusGen 2") ??
-    byNameContainsCi("musgen") ??
-    byNameCi("Online_retail") ??
-    arr[0] ??
-    null;
+  const picked = pickDefaultConnection(connections);
   return picked ? String(picked.id) : "";
 }
 

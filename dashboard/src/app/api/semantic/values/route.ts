@@ -27,22 +27,73 @@ function splitRefMaybe(ref: string): { model: string; field: string } | null {
   return { model: s.slice(0, idx).trim(), field: s.slice(idx + 1).trim() };
 }
 
+function fieldKeyExistsInModelDef(mdl: unknown, fieldKey: string): boolean {
+  if (!mdl || typeof mdl !== "object") return false;
+  const o = mdl as Record<string, unknown>;
+  const dims = o.dimensions && typeof o.dimensions === "object" ? (o.dimensions as object) : null;
+  const meas = o.measures && typeof o.measures === "object" ? (o.measures as object) : null;
+  const calcF = o.calculatedFields && typeof o.calculatedFields === "object" ? (o.calculatedFields as object) : null;
+  const calcM = o.calculatedMeasures && typeof o.calculatedMeasures === "object" ? (o.calculatedMeasures as object) : null;
+  return !!(
+    (dims && Object.prototype.hasOwnProperty.call(dims, fieldKey))
+    || (meas && Object.prototype.hasOwnProperty.call(meas, fieldKey))
+    || (calcF && Object.prototype.hasOwnProperty.call(calcF, fieldKey))
+    || (calcM && Object.prototype.hasOwnProperty.call(calcM, fieldKey))
+  );
+}
+
+/**
+ * Resolves `field` to a semantic model key and field name, supporting:
+ * - `Model.field`
+ * - `schema.Model.field` / `catalog.schema.Model.field` (skips leading segments when the first is not a model id)
+ */
+function parseSemanticRefAgainstModel(semanticModel: SemanticModelV1, field: string): { model: string; fieldKey: string } | null {
+  const s = normalizeFieldKey(field);
+  const parts = s.split(".").map((p) => p.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+  const models = (semanticModel as any)?.models;
+  if (!models || typeof models !== "object") return null;
+
+  const candidates: Array<{ model: string; fieldKey: string }> = [];
+  candidates.push({ model: parts[0], fieldKey: parts.slice(1).join(".") });
+  if (parts.length >= 3) {
+    candidates.push({ model: parts[1], fieldKey: parts.slice(2).join(".") });
+  }
+  if (parts.length >= 4) {
+    candidates.push({ model: parts[2], fieldKey: parts.slice(3).join(".") });
+  }
+
+  const seen = new Set<string>();
+  for (const c of candidates) {
+    const sig = `${c.model}\0${c.fieldKey}`;
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    const mdl = (models as any)[c.model];
+    if (!mdl || typeof mdl !== "object") continue;
+    if (fieldKeyExistsInModelDef(mdl, c.fieldKey)) {
+      return { model: c.model, fieldKey: c.fieldKey };
+    }
+  }
+  return null;
+}
+
+function safeIdentifier(raw: string): string {
+  const s = String(raw ?? "").trim();
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(s)) {
+    throw new Error(`Unsafe identifier: ${s}`);
+  }
+  return s;
+}
+
 function resolveSemanticFieldRef(semanticModel: SemanticModelV1, fieldInput: string): { sourceModel: string; ref: string } | null {
   const input = normalizeFieldKey(fieldInput);
   const models = (semanticModel as any)?.models;
   if (!models || typeof models !== "object") return null;
 
-  // 1) Exact model.field
-  const maybe = splitRefMaybe(input);
-  if (maybe) {
-    const mdl = (models as any)[maybe.model];
-    if (mdl && typeof mdl === "object") {
-      const dims = (mdl as any).dimensions ?? {};
-      const meas = (mdl as any).measures ?? {};
-      if (Object.prototype.hasOwnProperty.call(dims, maybe.field) || Object.prototype.hasOwnProperty.call(meas, maybe.field)) {
-        return { sourceModel: maybe.model, ref: `${maybe.model}.${maybe.field}` };
-      }
-    }
+  // 1) Exact model.field (and multi-segment field keys)
+  const parsedStrict = parseSemanticRefAgainstModel(semanticModel, input);
+  if (parsedStrict) {
+    return { sourceModel: parsedStrict.model, ref: `${parsedStrict.model}.${parsedStrict.fieldKey}` };
   }
 
   const parsed = parseTableAndColumn(input);
@@ -86,7 +137,15 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now();
   const rid = createRequestId("semv");
   try {
-    const body = await request.json();
+    let body: any;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body", queryError: { code: "INVALID_REQUEST", message: "Malformed JSON in request body" } },
+        { status: 400 }
+      );
+    }
 
     const semanticDebug = String(process.env.SEMANTIC_DEBUG ?? "").trim() === "1" || body?.debug === true;
     const debug = body?.debug === true;
@@ -102,9 +161,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "field is required (missing or empty)" }, { status: 400 });
     }
 
-    // Power BI-like strictness: require model.field.
-    const parsedStrict = splitRefMaybe(field);
-    if (!parsedStrict) {
+    // Power BI-like strictness: require at least Model.field (field key may contain dots).
+    if (!field.includes(".")) {
       return NextResponse.json(
         {
           error: "field must be a semantic ref in format 'Model.field'",
@@ -114,9 +172,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const purpose = typeof body?.purpose === "string" ? body.purpose.trim().toLowerCase() : "";
     const search = typeof body?.search === "string" ? body.search.trim() : "";
+    const sortOrderRaw = String(body?.sortOrder ?? "asc").trim().toLowerCase();
+    const sortOrder: "asc" | "desc" = sortOrderRaw === "desc" ? "desc" : "asc";
     const limitRaw = Number(body?.limit ?? 30);
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 30;
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, limitRaw)) : 30;
     const pageRaw = Number(body?.page ?? 1);
     const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
     const offset = (page - 1) * limit;
@@ -176,25 +237,49 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "semantic model is invalid" }, { status: 400 });
     }
 
-    const resolved = allowLegacy
-      ? resolveSemanticFieldRef(semanticModel as any, field)
-      : { sourceModel: parsedStrict.model, ref: `${parsedStrict.model}.${parsedStrict.field}` };
-    if (!resolved) {
+    let resolved: { sourceModel: string; ref: string } | null = null;
+    let strictParts: { model: string; fieldKey: string } | null = null;
+
+    if (allowLegacy) {
+      resolved = resolveSemanticFieldRef(semanticModel as any, field);
+      if (!resolved) {
+        return NextResponse.json({ error: "field not found in semantic model" }, { status: 400 });
+      }
+      strictParts = parseSemanticRefAgainstModel(semanticModel, field)
+        ?? parseSemanticRefAgainstModel(semanticModel, resolved.ref);
+      if (!strictParts) {
+        const sp = splitRefMaybe(resolved.ref);
+        strictParts = sp ? { model: sp.model, fieldKey: sp.field } : null;
+      }
+    } else {
+      strictParts = parseSemanticRefAgainstModel(semanticModel, field);
+      if (!strictParts) {
+        return NextResponse.json({ error: "field not found in semantic model" }, { status: 400 });
+      }
+      resolved = { sourceModel: strictParts.model, ref: `${strictParts.model}.${strictParts.fieldKey}` };
+    }
+
+    if (!resolved || !strictParts) {
       return NextResponse.json({ error: "field not found in semantic model" }, { status: 400 });
     }
 
-    if (!allowLegacy) {
+    if (purpose === "slicer") {
       const models = (semanticModel as any)?.models;
-      const mdl = models && typeof models === "object" ? (models as any)[resolved.sourceModel] : null;
+      const mdl = models && typeof models === "object" ? (models as any)[strictParts.model] : null;
+      const fk = strictParts.fieldKey;
       const dims = mdl && typeof mdl === "object" ? (mdl as any).dimensions : null;
       const meas = mdl && typeof mdl === "object" ? (mdl as any).measures : null;
-      const ok = !!(
-        dims && typeof dims === "object" && Object.prototype.hasOwnProperty.call(dims, parsedStrict.field)
-      ) || !!(
-        meas && typeof meas === "object" && Object.prototype.hasOwnProperty.call(meas, parsedStrict.field)
-      );
-      if (!ok) {
-        return NextResponse.json({ error: "field not found in semantic model" }, { status: 400 });
+      const cf = mdl && typeof mdl === "object" ? (mdl as any).calculatedFields : null;
+      const cm = mdl && typeof mdl === "object" ? (mdl as any).calculatedMeasures : null;
+      const isDim = dims && typeof dims === "object" && Object.prototype.hasOwnProperty.call(dims, fk);
+      const isCf = cf && typeof cf === "object" && Object.prototype.hasOwnProperty.call(cf, fk);
+      const isMeas = meas && typeof meas === "object" && Object.prototype.hasOwnProperty.call(meas, fk);
+      const isCm = cm && typeof cm === "object" && Object.prototype.hasOwnProperty.call(cm, fk);
+      if ((isMeas || isCm) && !isDim && !isCf) {
+        return NextResponse.json(
+          { error: "Slicer values are only supported for dimensions and time fields, not measures" },
+          { status: 400 }
+        );
       }
     }
 
@@ -202,8 +287,6 @@ export async function POST(request: NextRequest) {
       sourceModel: resolved.sourceModel,
       dimensions: [resolved.ref],
       filters: search ? [{ field: resolved.ref, op: "contains", values: [search] }] : [],
-      limit: limit,
-      ...(offset > 0 ? { offset } : {}),
     } as any;
 
     const pool = (await import("../../../../lib/datatalkMetaDb")).getDataTalkMetaPool();
@@ -226,11 +309,13 @@ export async function POST(request: NextRequest) {
 
     const boundForSource = resolved.sourceModel ? sourceBindings[resolved.sourceModel] : null;
     const connectionIdForDialect = String(boundForSource?.connectionId ?? "").trim();
-    let dialectHint: "clickhouse" | "postgres" = "postgres";
+    let dialectHint: "clickhouse" | "postgres" | "mssql" = "postgres";
     if (connectionIdForDialect) {
       const { getConnectionById } = await import("../../../../lib/datatalkMetaDb");
       const conn = await getConnectionById(connectionIdForDialect).catch(() => null);
-      dialectHint = (conn?.type === "clickhouse") ? "clickhouse" : "postgres";
+      if (conn?.type === "clickhouse") dialectHint = "clickhouse";
+      else if (conn?.type === "mssql") dialectHint = "mssql";
+      else dialectHint = "postgres";
     }
 
     const compiled = compileSemanticQuery({
@@ -244,9 +329,12 @@ export async function POST(request: NextRequest) {
 
     // We want distinct suggestions; wrap the compiled SQL.
     // Assumes first selected column alias is the field name (planner uses alias = field).
+    const selectedFieldAlias = safeIdentifier(strictParts.fieldKey);
     const distinctSql = dialectHint === "clickhouse"
-      ? `SELECT DISTINCT toString(v) as v FROM (${compiled.sql}) as t(v) ORDER BY v LIMIT ${limit}`
-      : `SELECT DISTINCT v FROM (${compiled.sql}) as t(v) ORDER BY v LIMIT ${limit}`;
+      ? `SELECT DISTINCT toString(${selectedFieldAlias}) as v FROM (${compiled.sql}) sub ORDER BY v ${sortOrder.toUpperCase()} LIMIT ${limit} OFFSET ${offset}`
+      : dialectHint === "mssql"
+        ? `SELECT DISTINCT CAST(${selectedFieldAlias} AS NVARCHAR(MAX)) as v FROM (${compiled.sql}) sub ORDER BY v ${sortOrder.toUpperCase()} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
+        : `SELECT DISTINCT CAST(${selectedFieldAlias} AS TEXT) as v FROM (${compiled.sql}) sub ORDER BY v ${sortOrder.toUpperCase()} LIMIT ${limit} OFFSET ${offset}`;
 
     const compileOnly = body?.compileOnly === true;
     if (compileOnly) {

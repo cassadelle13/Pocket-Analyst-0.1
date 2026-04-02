@@ -68,7 +68,43 @@ export function ConnectionStateProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      // Verify with server that connection is still valid
+      let validIds: Set<string> | null = null;
+      try {
+        const listRes = await fetch("/api/datatalk/connections", { cache: "no-store", signal: ctrl.signal });
+        if (listRes.ok) {
+          const listJson = await listRes.json().catch(() => ({}));
+          const rows = Array.isArray(listJson?.data) ? listJson.data : [];
+          validIds = new Set(rows.map((r: { id?: string }) => String(r?.id ?? "").trim()).filter(Boolean));
+        }
+      } catch {
+        validIds = null;
+      }
+
+      const storedParsed = (() => {
+        if (typeof window === "undefined") return null;
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (!stored) return null;
+        try {
+          return JSON.parse(stored) as ActiveConnection;
+        } catch {
+          return null;
+        }
+      })();
+
+      if (storedParsed?.id) {
+        if (!validIds || validIds.has(String(storedParsed.id))) {
+          setActiveConnectionState(storedParsed);
+          if (!validIds) {
+            return;
+          }
+          return;
+        }
+        setActiveConnectionState(null);
+        if (typeof window !== "undefined") {
+          localStorage.removeItem(STORAGE_KEY);
+        }
+      }
+
       const res = await fetch("/api/connection/status", { cache: "no-store", signal: ctrl.signal });
       if (res.ok) {
         const data = await res.json();
@@ -79,9 +115,11 @@ export function ConnectionStateProvider({ children }: { children: ReactNode }) {
             type: data.connection.type,
             connectedAt: data.connection.connectedAt || new Date().toISOString(),
           };
-          setActiveConnectionState(conn);
-          if (typeof window !== "undefined") {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(conn));
+          if (!validIds || validIds.has(conn.id)) {
+            setActiveConnectionState(conn);
+            if (typeof window !== "undefined") {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(conn));
+            }
           }
         } else {
           setActiveConnectionState(null);
@@ -111,9 +149,36 @@ export function ConnectionStateProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Silent background health-check — never touches isLoading to avoid canvas remount
+  const silentHealthCheck = useCallback(async () => {
+    try {
+      const res = await fetch("/api/connection/status", {
+        cache: "no-store",
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      if (!data?.connected) {
+        // Agent is down — only clear state when localStorage is also empty
+        // (keeps UI usable if agent temporarily restarts)
+        const stored = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
+        if (!stored) setActiveConnectionState(null);
+      }
+    } catch {
+      // Network error / timeout — ignore, don't disrupt UX
+    }
+  }, []);
+
   useEffect(() => {
     refreshConnectionState();
   }, [refreshConnectionState]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void silentHealthCheck();
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [silentHealthCheck]);
 
   return (
     <ConnectionStateContext.Provider

@@ -27,7 +27,7 @@ interface DatabaseConnectionModalProps {
   isOpen: boolean;
   variant?: "primary" | "schema" | "vector" | "warehouse" | "cloud" | "streaming";
   onClose: () => void;
-  onConnected?: (driverId: string, driverName: string, driverCategories: string[]) => void;
+  onConnected?: (driverId: string, driverName: string, driverCategories: string[], protocol?: string) => void;
 }
 
 export function DatabaseConnectionModal({ isOpen, variant = "primary", onClose, onConnected }: DatabaseConnectionModalProps) {
@@ -171,7 +171,12 @@ export function DatabaseConnectionModal({ isOpen, variant = "primary", onClose, 
       appendLog("Connection established successfully!");
       setTimeout(() => {
         if (onConnected && selectedDriver) {
-          onConnected(selectedDriver.id, selectedDriver.name, selectedDriver.categories);
+          onConnected(
+            selectedDriver.id,
+            selectedDriver.name,
+            selectedDriver.categories,
+            selectedDriver.connectivity?.protocol
+          );
         }
         onClose();
         reset();

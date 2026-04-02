@@ -10,17 +10,8 @@ export function ConnectionGate({ children }: { children: React.ReactNode }) {
   const { activeConnection, isLoading } = useConnectionState();
 
   useEffect(() => {
-    // Skip gate for /connect page itself
-    if (pathname === "/connect") {
-      return;
-    }
-
-    // Wait for connection state to load
-    if (isLoading) {
-      return;
-    }
-
-    // If no active connection, redirect to /connect
+    if (pathname === "/connect") return;
+    if (isLoading) return;
     if (!activeConnection) {
       router.push("/connect");
     }

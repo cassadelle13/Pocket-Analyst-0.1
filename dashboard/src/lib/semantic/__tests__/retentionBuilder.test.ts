@@ -1,4 +1,5 @@
 import { buildRetentionQuery, buildRetentionWidePivotQuery } from "../retentionBuilder";
+import { test } from "vitest";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -48,4 +49,6 @@ function main() {
   console.log("retention builder suite: OK");
 }
 
-main();
+test("retention builder suite", () => {
+  main();
+});

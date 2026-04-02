@@ -1,8 +1,11 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
-import { Edit3, X } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Edit3, Filter, Sparkles, X } from "lucide-react";
 import { ChartActionsMenu } from "../charts/ChartActionsMenu";
+import { useCrossSelection } from "@/store/crossSelectionContext";
+import { useVisualInteractions } from "@/store/visualInteractionsContext";
+import { resolveVisualInteractionMode } from "@/lib/visualInteractions";
 
 export function ChartWindow({
   id,
@@ -35,6 +38,36 @@ export function ChartWindow({
   const [value, setValue] = useState(title);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { crossSelection, clearCrossSelection } = useCrossSelection();
+  const {
+    editInteractionsMode,
+    interactionSourceChartId,
+    visualInteractions,
+    setInteractionMode,
+  } = useVisualInteractions();
+  const isCrossSource = String(crossSelection?.sourceChartId ?? "").trim() === id;
+  const sourceId = String(interactionSourceChartId ?? "").trim();
+  const isTargetOfInteractionEdit = Boolean(editInteractionsMode && sourceId && sourceId !== id);
+  const isSlicerVisual = useMemo(() => {
+    const kind = String((chartData as any)?.kind ?? chartKind ?? "").trim().toLowerCase();
+    const name = String(chartName ?? "").trim().toLowerCase();
+    return kind === "slicer" || kind === "param-slicer" || name.includes("slicer");
+  }, [chartData, chartKind, chartName]);
+  const effectiveVizType = useMemo(() => {
+    const kind = String((chartData as any)?.kind ?? "").trim().toLowerCase();
+    if (kind === "slicer" || kind === "param-slicer") return "slicer";
+    const cfgViz = String((chartData as any)?.chartConfig?.general?.vizType ?? "").trim().toLowerCase();
+    return cfgViz || String(chartKind ?? "").trim().toLowerCase() || String(chartName ?? "").trim().toLowerCase();
+  }, [chartData, chartKind, chartName]);
+  const currentInteractionMode = useMemo(() => {
+    if (!isTargetOfInteractionEdit) return "none";
+    return resolveVisualInteractionMode({
+      sourceChartId: sourceId,
+      targetChartId: id,
+      targetChartType: effectiveVizType,
+      map: visualInteractions,
+    });
+  }, [isTargetOfInteractionEdit, sourceId, id, effectiveVizType, visualInteractions]);
 
   useEffect(() => {
     setValue(title);
@@ -59,7 +92,9 @@ export function ChartWindow({
   return (
     <div
       className={`flex flex-col h-full w-full rounded-xl border bg-slate-900/70 backdrop-blur-md overflow-hidden transition-all duration-300 ${
-        isActive
+        isCrossSource
+          ? "border-sky-400/90 ring-2 ring-sky-400/60 shadow-[0_0_18px_rgba(56,189,248,0.28)]"
+          : isActive
           ? "border-emerald-400/90 ring-2 ring-emerald-400/60 shadow-[0_0_20px_rgba(34,197,94,0.3)]"
           : "border-white/15 shadow-xl"
       }`}
@@ -89,6 +124,11 @@ export function ChartWindow({
           {isActive && (
             <span className="inline-flex items-center px-2 py-0.5 rounded-full border border-emerald-400/40 bg-emerald-500/15 text-[10px] font-bold tracking-wider text-emerald-200">
               SELECTED
+            </span>
+          )}
+          {isCrossSource && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full border border-sky-400/40 bg-sky-500/15 text-[10px] font-bold tracking-wider text-sky-200">
+              CROSS ACTIVE
             </span>
           )}
           {editing ? (
@@ -130,6 +170,42 @@ export function ChartWindow({
           )}
         </div>
         <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+          {isTargetOfInteractionEdit && (
+            <div className="inline-flex items-center gap-1 rounded-md border border-sky-400/30 bg-sky-500/10 px-1.5 py-1">
+              <button
+                type="button"
+                onClick={() => setInteractionMode(sourceId, id, "filter")}
+                className={`inline-flex items-center justify-center rounded px-1 py-0.5 ${
+                  currentInteractionMode === "filter" ? "bg-sky-400/25 text-sky-100" : "text-slate-300 hover:bg-white/10"
+                }`}
+                title="Filter interaction"
+              >
+                <Filter className="w-3.5 h-3.5" />
+              </button>
+              {!isSlicerVisual && (
+                <button
+                  type="button"
+                  onClick={() => setInteractionMode(sourceId, id, "highlight")}
+                  className={`inline-flex items-center justify-center rounded px-1 py-0.5 ${
+                    currentInteractionMode === "highlight" ? "bg-sky-400/25 text-sky-100" : "text-slate-300 hover:bg-white/10"
+                  }`}
+                  title="Highlight interaction"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setInteractionMode(sourceId, id, "none")}
+                className={`inline-flex items-center justify-center rounded px-1 py-0.5 text-[10px] font-semibold ${
+                  currentInteractionMode === "none" ? "bg-sky-400/25 text-sky-100" : "text-slate-300 hover:bg-white/10"
+                }`}
+                title="No interaction"
+              >
+                Ø
+              </button>
+            </div>
+          )}
           {/* Edit Mode indicator - only for tables */}
           {isEditMode && (chartKind === "Table" || chartName?.includes("Table")) && (
             <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-semibold uppercase tracking-wider">
@@ -140,6 +216,20 @@ export function ChartWindow({
           <div data-chart-actions="true">
             <ChartActionsMenu chartId={id} params={{ chartData, chartTitle: title, chartName, chartKind }} />
           </div>
+          {isCrossSource && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                clearCrossSelection();
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="px-2 py-1 rounded-md border border-sky-400/35 bg-sky-500/10 text-[10px] font-semibold uppercase tracking-wide text-sky-200 hover:bg-sky-500/20"
+              title="Clear cross selection"
+            >
+              Clear
+            </button>
+          )}
           {onDelete && (
             <div className="relative">
               <button

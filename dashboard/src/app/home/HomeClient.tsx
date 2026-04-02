@@ -2,11 +2,12 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { HomeIcon, X } from "lucide-react";
+import { X } from "lucide-react";
 import { DatabaseConnectionStatus } from "../../components/home/DatabaseConnectionStatus";
 import { DatabaseConnectionModal } from "../../components/connection/DatabaseConnectionModal";
 import { DbExplorerModal } from "../../components/dashboard/DbExplorerModal";
 import { MyProjects } from "../../components/home/MyProjects";
+import { FileUploadDropZone } from "../../components/home/FileUploadDropZone";
 import { useConnectionState } from "../../providers";
 
 type ConnectionVariant = "primary" | "schema" | "vector" | "warehouse" | "cloud" | "streaming";
@@ -16,6 +17,8 @@ interface ConnectedModule {
   driverName: string;
   displayName: string;
   variant: ConnectionVariant;
+  /** DB protocol for queries (e.g. postgres) */
+  connectionType?: string;
 }
 
 const MODULES_STORAGE_KEY = "pa_home_modules";
@@ -55,6 +58,7 @@ function loadModules(): (ConnectedModule | null)[] {
           result[i] = {
             ...m,
             displayName: normalizedDisplayName,
+            connectionType: m.connectionType ?? "postgres",
           };
         }
       });
@@ -76,7 +80,7 @@ export default function HomeClient() {
   // Slots: each can be null (empty) or a connected module
   const [modules, setModules] = useState<(ConnectedModule | null)[]>(() => loadModules());
 
-  const { activeConnection } = useConnectionState();
+  const { activeConnection, setActiveConnection } = useConnectionState();
   const [projectsCount, setProjectsCount] = useState(0);
 
   // Wizard modal state
@@ -114,7 +118,13 @@ export default function HomeClient() {
         if (existing) {
           const nextName = acName || existing.driverName;
           if (existing.driverId !== ac.id || existing.driverName !== nextName || existing.variant !== "primary") {
-            arr[targetIdx] = { ...existing, driverId: ac.id, driverName: nextName, variant: "primary" };
+            arr[targetIdx] = {
+              ...existing,
+              driverId: ac.id,
+              driverName: nextName,
+              variant: "primary",
+              connectionType: String(ac.type ?? existing.connectionType ?? "postgres"),
+            };
             changed = true;
           }
         }
@@ -126,6 +136,7 @@ export default function HomeClient() {
             driverName: acName || "Connected DB",
             displayName: "Database Connection",
             variant: "primary",
+            connectionType: String(ac.type ?? "postgres"),
           };
           changed = true;
         }
@@ -159,15 +170,59 @@ export default function HomeClient() {
     setActiveSlot(null);
   }, []);
 
-  const handleConnected = useCallback((driverId: string, driverName: string, driverCategories: string[]) => {
-    if (activeSlot === null) return;
-    const variant = categoriesToVariant(driverCategories);
+  const handleConnected = useCallback(
+    (driverId: string, driverName: string, driverCategories: string[], protocol?: string) => {
+      if (activeSlot === null) return;
+      const variant = categoriesToVariant(driverCategories);
+      setModules((prev) => {
+        const next = [...prev];
+        next[activeSlot] = {
+          driverId,
+          driverName,
+          displayName: "Database Connection",
+          variant,
+          connectionType: protocol ?? "postgres",
+        };
+        return next;
+      });
+    },
+    [activeSlot]
+  );
+
+  const ensureSlotForConnection = useCallback((connectionId: string, connectionName: string) => {
     setModules((prev) => {
-      const next = [...prev];
-      next[activeSlot] = { driverId, driverName, displayName: "Database Connection", variant };
-      return next;
+      const arr = [...prev];
+      if (arr.some((m) => m && String(m.driverId) === String(connectionId))) {
+        return prev;
+      }
+      const emptyIdx = arr.findIndex((m) => !m);
+      if (emptyIdx < 0) return prev;
+      arr[emptyIdx] = {
+        driverId: connectionId,
+        driverName: connectionName,
+        displayName: "Database Connection",
+        variant: "primary",
+        connectionType: "postgres",
+      };
+      return arr;
     });
-  }, [activeSlot]);
+  }, []);
+
+  const toggleSlotActive = useCallback(
+    (mod: ConnectedModule, nextOn: boolean) => {
+      if (nextOn) {
+        setActiveConnection({
+          id: mod.driverId,
+          name: mod.driverName,
+          type: (mod.connectionType as any) ?? "postgres",
+          connectedAt: new Date().toISOString(),
+        });
+      } else if (activeConnection?.id === mod.driverId) {
+        setActiveConnection(null);
+      }
+    },
+    [activeConnection?.id, setActiveConnection]
+  );
 
   const renameModule = useCallback((slotIndex: number, newName: string) => {
     setModules((prev) => {
@@ -240,6 +295,8 @@ export default function HomeClient() {
             </div>
           )}
 
+          <FileUploadDropZone onEnsureSlot={ensureSlotForConnection} />
+
           {/* Database Module Slots */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {modules.slice(0, visibleCount).map((mod, slotIndex) => (
@@ -252,6 +309,8 @@ export default function HomeClient() {
                       size="large"
                       displayName={mod.displayName}
                       bottomLabel={mod.driverName}
+                      isConnectedOverride={activeConnection?.id === mod.driverId}
+                      onToggleConnection={(next) => toggleSlotActive(mod, next)}
                       onRename={(newName) => renameModule(slotIndex, newName)}
                       onClick={() => {
                         setExplorerModule(mod);
@@ -301,9 +360,9 @@ export default function HomeClient() {
       <DbExplorerModal
         isOpen={explorerOpen}
         onClose={() => { setExplorerOpen(false); setExplorerModule(null); }}
-        connectionId={activeConnection?.id ?? explorerModule?.driverId ?? ""}
+        connectionId={explorerModule?.driverId ?? activeConnection?.id ?? ""}
         connectionName={explorerModule?.displayName ?? explorerModule?.driverName}
-        connectionType={explorerModule?.driverId}
+        connectionType={explorerModule?.connectionType ?? activeConnection?.type ?? "postgres"}
       />
     </div>
   );

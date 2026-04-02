@@ -25,8 +25,11 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    const connectionId = typeof body?.connectionId === "string" ? body.connectionId : null;
-    if (connectionId && !isUuid(connectionId)) {
+    const connectionId = typeof body?.connectionId === "string" ? body.connectionId.trim() : "";
+    if (!connectionId) {
+      return NextResponse.json({ error: "connectionId is required" }, { status: 400 });
+    }
+    if (!isUuid(connectionId)) {
       return NextResponse.json({ error: "Invalid connectionId format" }, { status: 400 });
     }
     const sqlText = typeof body?.sql === "string" ? body.sql : "";
@@ -35,28 +38,26 @@ export async function POST(request: NextRequest) {
 
     let connectionName: string | null = null;
 
-    const agentPayload = connectionId
-      ? await (async () => {
-          const secret = await getConnectionSecretForAgent(connectionId);
-          if (!secret) {
-            return null;
-          }
+    const agentPayload = await (async () => {
+      const secret = await getConnectionSecretForAgent(connectionId);
+      if (!secret) {
+        return null;
+      }
 
-          connectionName = secret.name;
+      connectionName = secret.name;
 
-          return {
-            connection: secret.connection,
-            sql: body?.sql,
-            role: body?.role,
-            maxRows: body?.maxRows,
-            timeoutMs: body?.timeoutMs,
-          };
-        })()
-      : body;
+      return {
+        connection: secret.connection,
+        sql: body?.sql,
+        role: body?.role,
+        maxRows: body?.maxRows,
+        timeoutMs: body?.timeoutMs,
+      };
+    })();
 
     const dbType = typeof agentPayload?.connection?.type === "string" ? agentPayload.connection.type : null;
 
-    if (connectionId && !agentPayload) {
+    if (!agentPayload) {
       try {
         await insertQueryAudit({
           connectionId,

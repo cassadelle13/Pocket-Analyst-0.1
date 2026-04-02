@@ -12,7 +12,15 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now();
   const rid = createRequestId("semq");
   try {
-    const body = (await request.json()) as SemanticQueryRequest;
+    let body: SemanticQueryRequest;
+    try {
+      body = (await request.json()) as SemanticQueryRequest;
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body", queryError: { code: "INVALID_REQUEST", message: "Malformed JSON in request body" } },
+        { status: 400 }
+      );
+    }
     const validatedRequest = validateSemanticQueryRequest(body);
     if (!validatedRequest.ok) {
       return NextResponse.json(
@@ -140,6 +148,8 @@ export async function POST(request: NextRequest) {
       const dimsIn = Array.isArray((rawQuery as any)?.dimensions) ? (rawQuery as any).dimensions : [];
       const measIn = Array.isArray((rawQuery as any)?.measures) ? (rawQuery as any).measures : [];
       const measV2In = Array.isArray((rawQuery as any)?.measuresV2) ? (rawQuery as any).measuresV2 : [];
+      const filtersIn = Array.isArray((rawQuery as any)?.filters) ? (rawQuery as any).filters : [];
+      const clientClassified = (rawQuery as any)?.clientClassified === true;
       const tableVizRequested = String((rawQuery as any)?.vizType ?? (rawQuery as any)?.__vizType ?? "").trim().toLowerCase() === "table";
       const measureAggOverridesIn = ((rawQuery as any)?.measureAggOverrides && typeof (rawQuery as any).measureAggOverrides === "object")
         ? ((rawQuery as any).measureAggOverrides as Record<string, unknown>)
@@ -161,24 +171,60 @@ export async function POST(request: NextRequest) {
         return !!field && Object.prototype.hasOwnProperty.call(measureAggOverridesOut, field);
       };
       const noFallbackMeasure = (rawQuery as any)?.noFallbackMeasure === true;
+      const pickFallbackMeasure = (srcDef: any): string => {
+        const srcMeasures = srcDef?.measures && typeof srcDef.measures === "object" ? Object.keys(srcDef.measures) : [];
+        if (srcMeasures.includes("row_count")) return "row_count";
+        const sorted = srcMeasures
+          .map((m: any) => String(m ?? "").trim())
+          .filter(Boolean)
+          .sort((a, b) => a.localeCompare(b));
+        return String(sorted[0] ?? "").trim();
+      };
 
       const dimsOut: string[] = [];
       const measOut: string[] = [];
+      const filtersOut = filtersIn
+        .map((f: any) => {
+          if (!f || typeof f !== "object") return null;
+          const field = toRef(String(f?.field ?? ""));
+          if (!field) return null;
+          const fieldAliasRaw = String(f?.fieldAlias ?? "").trim();
+          const fieldAlias = fieldAliasRaw ? toRef(fieldAliasRaw) : "";
+          return {
+            ...f,
+            field,
+            ...(fieldAlias ? { fieldAlias } : {}),
+          };
+        })
+        .filter(Boolean);
 
-      for (const d of dimsIn) {
-        const ref = toRef(String(d ?? ""));
-        if (!ref) continue;
-        const kind = classifyFieldRef(ref, semanticModel as SemanticModelV1);
-        if (kind === "measure") measOut.push(ref);
-        else dimsOut.push(ref);
-      }
+      if (clientClassified) {
+        for (const d of dimsIn) {
+          const ref = toRef(String(d ?? ""));
+          if (!ref) continue;
+          dimsOut.push(ref);
+        }
+        for (const m of measIn) {
+          const ref = toRef(String(m ?? ""));
+          if (!ref) continue;
+          measOut.push(ref);
+        }
+      } else {
+        for (const d of dimsIn) {
+          const ref = toRef(String(d ?? ""));
+          if (!ref) continue;
+          const kind = classifyFieldRef(ref, semanticModel as SemanticModelV1);
+          if (kind === "measure") measOut.push(ref);
+          else dimsOut.push(ref);
+        }
 
-      for (const m of measIn) {
-        const ref = toRef(String(m ?? ""));
-        if (!ref) continue;
-        const kind = classifyFieldRef(ref, semanticModel as SemanticModelV1);
-        if (kind === "dimension" && !hasAggOverride(ref)) dimsOut.push(ref);
-        else measOut.push(ref);
+        for (const m of measIn) {
+          const ref = toRef(String(m ?? ""));
+          if (!ref) continue;
+          const kind = classifyFieldRef(ref, semanticModel as SemanticModelV1);
+          if (kind === "dimension" && !hasAggOverride(ref)) dimsOut.push(ref);
+          else measOut.push(ref);
+        }
       }
 
       const measV2Out = measV2In
@@ -194,8 +240,7 @@ export async function POST(request: NextRequest) {
       let measUnique = Array.from(new Set(measOut.map((x) => String(x).trim()).filter(Boolean)));
       if (measUnique.length === 0 && !noFallbackMeasure && !tableVizRequested && Object.keys(measureAggOverridesOut).length === 0) {
         const srcDef = (modelsObj as any)?.[src];
-        const srcMeasures = srcDef?.measures && typeof srcDef.measures === "object" ? Object.keys(srcDef.measures) : [];
-        const fallback = String(srcMeasures[0] ?? "").trim();
+        const fallback = pickFallbackMeasure(srcDef);
         if (fallback) measUnique = [`${src}.${fallback}`];
       }
 
@@ -204,6 +249,8 @@ export async function POST(request: NextRequest) {
         sourceModel: src,
         dimensions: dimsUnique,
         measures: measUnique,
+        ...(filtersOut.length > 0 ? { filters: filtersOut as any } : {}),
+        ...(clientClassified ? { clientClassified: true } : {}),
         ...(measV2Out.length > 0 ? { measuresV2: measV2Out } : {}),
         ...(Object.keys(measureAggOverridesOut).length > 0 ? { measureAggOverrides: measureAggOverridesOut } : {}),
         ...((noFallbackMeasure || tableVizRequested) ? { noFallbackMeasure: true } : {}),
@@ -312,6 +359,9 @@ export async function POST(request: NextRequest) {
 
     let compiled: ReturnType<typeof compileSemanticQuery>;
     try {
+      // #region agent log
+      fetch('http://127.0.0.1:7891/ingest/42f4b2b3-bbc6-4993-849a-db95471cb317',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6bac71'},body:JSON.stringify({sessionId:'6bac71',runId:'slicer-queryerror-run1',hypothesisId:'H4',location:'semantic/query/route.ts:beforeCompile',message:'semantic compile input',data:{rid,sourceModel:sourceModelName,dialectHint,requestContext,globalFiltersCount:Array.isArray((globalContext as any)?.filters)?(globalContext as any).filters.length:0,queryFiltersCount:Array.isArray((normalizedQuery as any)?.filters)?(normalizedQuery as any).filters.length:0},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       compiled = compileSemanticQuery({
         semanticModel: semanticModelForRequest as any,
         query: normalizedQuery,
@@ -322,6 +372,9 @@ export async function POST(request: NextRequest) {
       });
     } catch (compileErr: unknown) {
       const msg = compileErr instanceof Error ? compileErr.message : "Failed to compile semantic query";
+      // #region agent log
+      fetch('http://127.0.0.1:7891/ingest/42f4b2b3-bbc6-4993-849a-db95471cb317',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6bac71'},body:JSON.stringify({sessionId:'6bac71',runId:'slicer-queryerror-run1',hypothesisId:'H4',location:'semantic/query/route.ts:compileError',message:'semantic compile failed',data:{rid,message:msg,requestContext,sourceModel:sourceModelName},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return NextResponse.json(
         {
           error: msg,
@@ -407,7 +460,8 @@ export async function POST(request: NextRequest) {
       cache,
     } : undefined;
 
-    const response = NextResponse.json({ data: json?.data ?? {}, debug }, { status: 200 });
+    const dataPayload = (json?.data ?? {}) as any;
+    const response = NextResponse.json({ data: dataPayload, debug }, { status: 200 });
     response.headers.set("x-correlation-id", rid);
     recordQueryMetric({
       route: "/api/semantic/query",

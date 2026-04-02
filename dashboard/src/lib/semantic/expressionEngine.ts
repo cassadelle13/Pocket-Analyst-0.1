@@ -2,7 +2,7 @@ import type { CalcAst, CalcParseError, CalcToken } from "./planner";
 import { compileCalcAstToSql, parseCalcExpr, parseCalcExprWithDiagnostics, tokenizeCalcExpr } from "./planner";
 import { createFullFunctionRegistry } from "./formulaRegistry";
 
-type SqlDialect = "clickhouse" | "postgres";
+type SqlDialect = "clickhouse" | "postgres" | "mssql";
 
 // Reuse CalcAst from planner.ts as ExprAstV1.
 export type ExprAstV1 = CalcAst;

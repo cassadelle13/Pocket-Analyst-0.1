@@ -7,7 +7,7 @@ export interface PropertyFilter {
 }
 
 export function escapeSQLString(value: string): string {
-  return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  return String(value).replace(/\\/g, "\\\\").replace(/'/g, "''");
 }
 
 export function sqlStringLiteral(value: string): string {

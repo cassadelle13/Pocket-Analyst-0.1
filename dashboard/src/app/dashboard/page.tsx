@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { RequireRole } from "../../components/auth";
 import { DragDropCanvas } from "../../components/dashboard/DragDropCanvas";
 import { Plus, X } from "lucide-react";
+import { dashboardEventBus } from "../../lib/dashboardEventBus";
 
 interface DashboardTab {
   id: string;
@@ -14,6 +15,7 @@ interface DashboardTab {
 export default function DashboardPage() {
   const searchParams = useSearchParams();
   const projectId = searchParams.get("project");
+  const [effectiveProjectId, setEffectiveProjectId] = useState<string | undefined>(undefined);
 
   const MAX_TABS = 10;
   const TABS_STORAGE_KEY = "dashboard:tabs";
@@ -27,6 +29,20 @@ export default function DashboardPage() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const storageKeyForTab = useCallback((tabId: string) => `dashboard:nodes:${tabId}`, []);
+
+  useEffect(() => {
+    try {
+      const fromUrl = String(projectId ?? "").trim();
+      if (fromUrl) {
+        setEffectiveProjectId(fromUrl);
+        return;
+      }
+      const fromStorage = String(window.localStorage.getItem("dashboard:semantic:projectId") ?? "").trim();
+      setEffectiveProjectId(fromStorage || undefined);
+    } catch {
+      setEffectiveProjectId(String(projectId ?? "").trim() || undefined);
+    }
+  }, [projectId]);
 
   useEffect(() => {
     try {
@@ -66,6 +82,12 @@ export default function DashboardPage() {
       window.localStorage.setItem(TABS_STORAGE_KEY, JSON.stringify(tabs));
       if (activeTabId) {
         window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, activeTabId);
+        window.dispatchEvent(
+          new CustomEvent("dashboard:tab-changed", {
+            detail: { tabId: activeTabId, activeTabId },
+          })
+        );
+        dashboardEventBus.publish("activeTabChanged", { tabId: activeTabId });
       }
     } catch {}
   }, [tabs, activeTabId]);
@@ -119,11 +141,6 @@ export default function DashboardPage() {
     setEditingTabId(null);
     setEditingTabName("");
   }, []);
-
-  const storageKey = useMemo(() => {
-    if (!activeTabId) return "";
-    return storageKeyForTab(activeTabId);
-  }, [activeTabId, storageKeyForTab]);
 
   const handleTabKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
@@ -237,7 +254,12 @@ export default function DashboardPage() {
           {/* Canvas fills the screen */}
           <div className="relative w-full h-full">
             {activeTabId && activeStorageKey && (
-              <DragDropCanvas key={activeTabId} storageKey={activeStorageKey} projectId={projectId ?? undefined} activeTabId={activeTabId} />
+              <DragDropCanvas
+                key={activeTabId}
+                storageKey={activeStorageKey}
+                projectId={effectiveProjectId}
+                activeTabId={activeTabId}
+              />
             )}
           </div>
         </div>

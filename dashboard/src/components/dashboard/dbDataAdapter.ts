@@ -8,6 +8,12 @@
 
 import { detectColType, pickAxes, type ColType, type AxisMapping } from "./dbChartBuilder";
 
+type MappingLike = {
+  xColumn?: string;
+  groupBy?: string;
+  yColumns?: Array<{ col?: string }>;
+};
+
 // ── Helpers ──
 
 function cellNum(r: unknown[], idx: number): number {
@@ -29,6 +35,42 @@ function parseTs(s: string): number {
   }
   const d = new Date(s);
   return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function findColIndex(cols: string[], refOrName: unknown): number {
+  const raw = String(refOrName ?? "").trim();
+  if (!raw) return -1;
+  const name = raw.includes(".") ? raw.split(".").slice(1).join(".") : raw;
+  if (!name) return -1;
+  const exact = cols.findIndex((c) => String(c).trim() === name);
+  if (exact >= 0) return exact;
+  const lower = name.toLowerCase();
+  return cols.findIndex((c) => String(c).trim().toLowerCase() === lower);
+}
+
+function resolveAxesFromMapping(cols: string[], mapping?: MappingLike | null): AxisMapping | null {
+  if (!mapping || typeof mapping !== "object") return null;
+  const xIdx = (() => {
+    const byX = findColIndex(cols, mapping.xColumn);
+    if (byX >= 0) return byX;
+    return findColIndex(cols, mapping.groupBy);
+  })();
+  const yIndices = Array.from(
+    new Set(
+      (Array.isArray(mapping.yColumns) ? mapping.yColumns : [])
+        .map((y) => findColIndex(cols, y?.col))
+        .filter((i) => i >= 0)
+    )
+  );
+  if (xIdx < 0 && yIndices.length === 0) return null;
+  return {
+    xIdx,
+    yIndices,
+    y2Indices: [],
+    numIndices: yIndices,
+    strIndices: xIdx >= 0 ? [xIdx] : [],
+    xIsDate: false,
+  };
 }
 
 function fmtNum(v: number): string {
@@ -56,17 +98,19 @@ export function toTimeSeries(
   cols: string[],
   rows: unknown[][],
   colTypes?: ColType[],
-  axes?: AxisMapping
+  axes?: AxisMapping,
+  mapping?: MappingLike | null
 ): { data: TimeSeriesPoint[]; seriesKeys: { key: string; name: string }[] } | null {
   const ct = colTypes ?? cols.map((c, i) => detectColType(rows, i, c));
-  const ax = axes ?? pickAxes(cols, ct);
+  const mappedAxes = resolveAxesFromMapping(cols, mapping);
+  const ax = mappedAxes ?? axes ?? pickAxes(cols, ct);
 
-  if (ax.xIdx < 0 || ax.yIndices.length === 0) return null;
+  if (ax.yIndices.length === 0) return null;
 
   const seriesKeys = ax.yIndices.map(i => ({ key: `y${i}`, name: cols[i] }));
 
   const data: TimeSeriesPoint[] = rows.map(r => {
-    const xVal = cellStr(r, ax.xIdx);
+    const xVal = ax.xIdx >= 0 ? cellStr(r, ax.xIdx) : "";
     let ts: number;
     if (ax.xIsDate) {
       ts = parseTs(xVal);
@@ -128,18 +172,20 @@ export function toPieData(
   cols: string[],
   rows: unknown[][],
   colTypes?: ColType[],
-  axes?: AxisMapping
+  axes?: AxisMapping,
+  mapping?: MappingLike | null
 ): { name: string; value: number }[] | null {
   const ct = colTypes ?? cols.map((c, i) => detectColType(rows, i, c));
-  const ax = axes ?? pickAxes(cols, ct);
+  const mappedAxes = resolveAxesFromMapping(cols, mapping);
+  const ax = mappedAxes ?? axes ?? pickAxes(cols, ct);
 
   const catIdx = ax.strIndices[0] ?? (ax.xIdx >= 0 ? ax.xIdx : -1);
   const valIdx = ax.numIndices[0] ?? ax.yIndices[0] ?? -1;
-  if (catIdx < 0 || valIdx < 0) return null;
+  if (valIdx < 0) return null;
 
   const agg = new Map<string, number>();
   for (const r of rows) {
-    const cat = cellStr(r, catIdx) || "(empty)";
+    const cat = (catIdx >= 0 ? cellStr(r, catIdx) : `Row ${agg.size + 1}`) || "(empty)";
     agg.set(cat, (agg.get(cat) ?? 0) + cellNum(r, valIdx));
   }
 
@@ -167,15 +213,17 @@ export function toEChartsXY(
   cols: string[],
   rows: unknown[][],
   colTypes?: ColType[],
-  axes?: AxisMapping
+  axes?: AxisMapping,
+  mapping?: MappingLike | null
 ): EChartsXY | null {
   const ct = colTypes ?? cols.map((c, i) => detectColType(rows, i, c));
-  const ax = axes ?? pickAxes(cols, ct);
+  const mappedAxes = resolveAxesFromMapping(cols, mapping);
+  const ax = mappedAxes ?? axes ?? pickAxes(cols, ct);
 
-  if (ax.xIdx < 0 || ax.yIndices.length === 0) return null;
+  if (ax.yIndices.length === 0) return null;
 
-  const xLabels = rows.map(r => {
-    const s = cellStr(r, ax.xIdx);
+  const xLabels = rows.map((r, idx) => {
+    const s = ax.xIdx >= 0 ? cellStr(r, ax.xIdx) : `Row ${idx + 1}`;
     if (ax.xIsDate) {
       const d = new Date(parseTs(s));
       if (!isNaN(d.getTime())) return d.toLocaleDateString("ru-RU", { month: "short", day: "numeric" });

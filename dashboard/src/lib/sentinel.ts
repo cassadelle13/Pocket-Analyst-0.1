@@ -126,10 +126,14 @@ class PocketSentinel {
               ? args[0].url
               : "";
         
-        // Track 5xx errors as network errors
+        // Track 5xx errors as network errors (skip routes that depend on external services)
         const isExpectedBackendError =
           requestUrl.includes("/api/insights") ||
-          requestUrl.includes("/api/rest/events-table");
+          requestUrl.includes("/api/rest/events-table") ||
+          requestUrl.includes("/api/semantic/") ||
+          requestUrl.includes("/api/datatalk/") ||
+          requestUrl.includes("/api/query") ||
+          requestUrl.includes("/api/connection/");
 
         if (response.status >= 500 && !isExpectedBackendError) {
           this.captureError({
@@ -203,16 +207,21 @@ class PocketSentinel {
     if (isAbortError) return;
 
     // Filter out expected backend unavailability errors
+    const errorUrl = String(error.metadata?.url || '');
     const isExpectedBackendError = 
       error.type === 'network_error' && 
       (error.message.includes('ClickHouse') || 
        error.message.includes('AI Service') ||
        error.message.includes('localhost:8123') ||
        error.message.includes('localhost:8000') ||
-       String(error.metadata?.url || '').includes('localhost:8000') ||
-       String(error.metadata?.url || '').includes('/api/s/s2s/track') ||
-       String(error.metadata?.url || '').includes('/api/insights') ||
-       String(error.metadata?.url || '').includes('/api/rest/events-table'));
+       errorUrl.includes('localhost:8000') ||
+       errorUrl.includes('/api/s/s2s/track') ||
+       errorUrl.includes('/api/insights') ||
+       errorUrl.includes('/api/rest/events-table') ||
+       errorUrl.includes('/api/semantic/') ||
+       errorUrl.includes('/api/datatalk/') ||
+       errorUrl.includes('/api/query') ||
+       errorUrl.includes('/api/connection/'));
 
     // Store error
     this.errors.push(error);

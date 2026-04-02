@@ -2,7 +2,7 @@
 
 import {useEffect, useMemo, useRef, useState} from "react";
 import {AnimatePresence, motion} from "framer-motion";
-import {Database, Edit, Layers, Map, Maximize2, Plus, ChevronUp, Camera, Save, SlidersHorizontal, Filter, Sparkles, BarChart3} from "lucide-react";
+import {Database, Edit, Layers, Map, Maximize2, Plus, ChevronUp, Camera, Save, SlidersHorizontal, Filter, Sparkles, BarChart3, RefreshCw} from "lucide-react";
 import {ChartLibrarySlideIn} from "./ChartLibrarySlideIn";
 import {DbSlideInPanel} from "./DbSlideInPanel";
 import {FieldsSlideInPanel} from "./FieldsSlideInPanel";
@@ -11,10 +11,12 @@ import {VisualizationsSlideInPanel} from "./VisualizationsSlideInPanel";
 import type {CommandBarHandle} from "./CommandBar";
 import {CommandBar} from "./CommandBar";
 import {useBiFilters} from "../../store/biFiltersContext";
+import { useVisualInteractions } from "@/store/visualInteractionsContext";
 import {useConnectionState} from "../../providers";
 import {SemanticModelProvider} from "../../context/SemanticModelContext";
+import { computeEffectivePageKey } from "../../lib/computeEffectivePageKey";
 
-type ActivePanel = "library" | "db" | "fields" | "filters" | "visualizations" | null;
+type LeftPanel = "library" | "db" | null;
 
 type AgentToolCall = {
   tool: string;
@@ -27,12 +29,18 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
   activeChartId?: string | null; 
   onResetZoom?: () => void; 
 }) {
-  const [activePanel, setActivePanel] = useState<ActivePanel>(null);
-  const openPanel = activePanel === "library" ? "library" : null;
-  const isDbPanelOpen = activePanel === "db";
-  const isFieldsPanelOpen = activePanel === "fields";
-  const isFiltersPanelOpen = activePanel === "filters";
-  const isVisualizationsPanelOpen = activePanel === "visualizations";
+  /** Left slide-ins (library vs db remain mutually exclusive). */
+  const [leftPanel, setLeftPanel] = useState<LeftPanel>(null);
+  /** Right slide-ins can stack so Fields + Visualizations stay open together (Direct SQL axis mapping). */
+  const [fieldsPanelOpen, setFieldsPanelOpen] = useState(false);
+  const [filtersPanelOpen, setFiltersPanelOpen] = useState(false);
+  const [visualizationsPanelOpen, setVisualizationsPanelOpen] = useState(false);
+
+  const openPanel = leftPanel === "library" ? "library" : null;
+  const isDbPanelOpen = leftPanel === "db";
+  const isFieldsPanelOpen = fieldsPanelOpen;
+  const isFiltersPanelOpen = filtersPanelOpen;
+  const isVisualizationsPanelOpen = visualizationsPanelOpen;
   const [isEditMode, setIsEditMode] = useState(false);
   const [isMenuVisible, setIsMenuVisible] = useState(true);
   const [isMenuExpanded, setIsMenuExpanded] = useState(false);
@@ -50,7 +58,8 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
   const dockRef = useRef<HTMLDivElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const { setActiveConnection } = useConnectionState();
-  const { filters: biFilters, version: biFilterVersion } = useBiFilters();
+  const { filters: biFilters, version: biFilterVersion, pageScopeMode } = useBiFilters();
+  const { editInteractionsMode, setEditInteractionsMode } = useVisualInteractions();
 
   const activeChartIdRef = useRef<string | null | undefined>(activeChartId);
   activeChartIdRef.current = activeChartId;
@@ -117,6 +126,9 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
   const [visualizationsPanelWidth, setVisualizationsPanelWidth] = useState<number>(() =>
     getPersistedPanelWidth("dashboard:visualizationsPanelWidth", RIGHT_PANEL_WIDTH)
   );
+  const [fieldsPanelWidth, setFieldsPanelWidth] = useState<number>(() =>
+    getPersistedPanelWidth("dashboard:fieldsPanelWidth", RIGHT_PANEL_WIDTH)
+  );
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -126,23 +138,47 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
       if (!Number.isFinite(width) || width <= 0) return;
       if (panel === "filters") setFiltersPanelWidth(width);
       if (panel === "visualizations") setVisualizationsPanelWidth(width);
+      if (panel === "fields") setFieldsPanelWidth(width);
     };
     window.addEventListener("dashboard:panel-width-changed", handler as EventListener);
     return () => window.removeEventListener("dashboard:panel-width-changed", handler as EventListener);
   }, []);
 
-  const activeTabId = useMemo(() => {
+  const [activeTabId, setActiveTabId] = useState<string | null>(() => {
     try {
       return String(window.localStorage.getItem("dashboard:activeTab") ?? "").trim() || null;
     } catch {
       return null;
     }
+  });
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as any;
+      const next = String(detail?.activeTabId ?? "").trim() || null;
+      setActiveTabId(next);
+    };
+    window.addEventListener("dashboard:active-tab-id", handler as EventListener);
+    return () => window.removeEventListener("dashboard:active-tab-id", handler as EventListener);
   }, []);
 
   const effectivePageKey = useMemo(() => {
-    // Matches ChartPreview/FiltersSlideInPanel semantics (tab mode uses tab id).
-    return activeTabId ? String(activeTabId) : "dashboard";
-  }, [activeTabId]);
+    return computeEffectivePageKey(pageScopeMode, activeTabId);
+  }, [pageScopeMode, activeTabId]);
+
+  const readDashboardCanvasNodes = (): any[] => {
+    try {
+      const tabId = String(window.localStorage.getItem("dashboard:activeTab") ?? "").trim();
+      const keys = tabId ? [`dashboard:nodes:${tabId}`, "dashboard:nodes"] : ["dashboard:nodes"];
+      for (const k of keys) {
+        const raw = window.localStorage.getItem(k);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {}
+    return [];
+  };
 
   const applyAgentToolCall = (tc: AgentToolCall) => {
     const name = String(tc?.tool ?? "").trim();
@@ -323,13 +359,19 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
       if (!slicerId) throw new Error("slicer_select_values: slicerId required");
       if (values.length === 0) throw new Error("slicer_select_values: values required");
 
-      const slicerTargetChartId = (() => {
-        const n = (Array.isArray(nodes) ? nodes : []).find((x: any) => String(x?.id ?? "") === slicerId);
-        const target = n && typeof n === "object" ? String((n as any)?.data?.__sourceChartId ?? "").trim() : "";
-        return target || slicerId;
-      })();
+      const canvasNodes = readDashboardCanvasNodes();
+      const n = canvasNodes.find((x: any) => String(x?.id ?? "") === slicerId);
+      const data = n && typeof n === "object" ? (n as any).data : null;
+      const rawLink = data && typeof data === "object" ? String((data as any).__sourceChartId ?? "").trim() : "";
+      const fp = data?.slicer && String((data.slicer as any).sourceKind ?? "") === "fieldParameter";
+      const explicitScope = String((data as any)?.__slicerBiScope ?? "").trim().toLowerCase();
+      const scope: "report" | "page" | "visual" =
+        explicitScope === "report" || explicitScope === "page" || explicitScope === "visual"
+          ? explicitScope
+          : (!rawLink || fp ? "report" : "visual");
+      const filterSourceKey =
+        scope === "visual" && rawLink && !fp ? rawLink : slicerId;
 
-      // Update slicer UI state
       window.dispatchEvent(
         new CustomEvent("dashboard:update-chart-data", {
           detail: {
@@ -343,27 +385,26 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
         })
       );
 
-      // Also apply a BI filter so other visuals actually receive it.
-      // Default to page scope (safest for a slicer control).
       try {
         const slicerField = String((args as any)?.fieldRef ?? "").trim();
         const field = slicerField || "";
         if (field) {
-          const next = [
-            ...(Array.isArray(biFilters) ? biFilters : []),
+          const prev = Array.isArray(biFilters) ? biFilters : [];
+          const merged = [
+            ...prev.filter((f: any) => String(f?.sourceChartId ?? "") !== filterSourceKey),
             {
               field,
               op: "in",
               values,
-              scope: "page",
-              pageKey: effectivePageKey,
-              sourceChartId: slicerTargetChartId,
+              scope,
+              pageKey: scope === "page" ? effectivePageKey : undefined,
+              sourceChartId: filterSourceKey,
             },
           ];
           window.dispatchEvent(
             new CustomEvent("dashboard:bi-filters-changed", {
               detail: {
-                filters: next,
+                filters: merged,
                 version: Number(biFilterVersion ?? 0) + 1,
               },
             })
@@ -385,7 +426,7 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
       activeChartId: activeChartId ? String(activeChartId) : null,
       effectivePageKey,
       biFiltersVersion: biFilterVersion,
-      pageScopeMode: "tab",
+      pageScopeMode,
     };
 
     const res = await fetch(`${aiServiceUrl}/agent/plan`, {
@@ -420,14 +461,14 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
 
   const spring = {type: "spring" as const, damping: 25, stiffness: 200};
 
-  const toggle = (id: Exclude<ActivePanel, null>) => {
-    setActivePanel((prev) => (prev === id ? null : id));
+  const toggleLibrary = () => {
+    setLeftPanel((prev) => (prev === "library" ? null : "library"));
   };
 
   useEffect(() => {
     const onOpenLibrary = () => {
       setIsMenuVisible(true);
-      setActivePanel("library");
+      setLeftPanel("library");
     };
     window.addEventListener("dashboard:open-library", onOpenLibrary);
     return () => window.removeEventListener("dashboard:open-library", onOpenLibrary);
@@ -439,7 +480,6 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
       const detail = (e as CustomEvent).detail;
       const next = !!detail?.open;
       setIsChartConfigOpen(next);
-      console.log('[DashboardDock] chart:config-state-changed', { open: next, detail });
     };
     window.addEventListener('chart:config-state-changed', handler);
     return () => window.removeEventListener('chart:config-state-changed', handler);
@@ -458,7 +498,10 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
       
       // Закрываем панель библиотеки
       if (openPanel || isDbPanelOpen || isFieldsPanelOpen || isFiltersPanelOpen || isVisualizationsPanelOpen) {
-        setActivePanel(null);
+        setLeftPanel(null);
+        setFieldsPanelOpen(false);
+        setFiltersPanelOpen(false);
+        setVisualizationsPanelOpen(false);
       }
 
       // Скрываем меню только если клик был не по кнопке раскрытия
@@ -475,7 +518,10 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
     if (!isDbPanelOpen && !isFieldsPanelOpen && !isFiltersPanelOpen && !isVisualizationsPanelOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setActivePanel(null);
+        setLeftPanel(null);
+        setFieldsPanelOpen(false);
+        setFiltersPanelOpen(false);
+        setVisualizationsPanelOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -486,7 +532,7 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
     const onOpenFromChartAction = (e: Event) => {
       const evt = e as CustomEvent<{ chartId?: string | null }>;
       setTargetChartId(evt.detail?.chartId ?? null);
-      setActivePanel("db");
+      setLeftPanel("db");
     };
     window.addEventListener("dashboard:open-db-explorer", onOpenFromChartAction as EventListener);
     return () => window.removeEventListener("dashboard:open-db-explorer", onOpenFromChartAction as EventListener);
@@ -494,29 +540,23 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
 
   const openDbPanel = () => {
     setTargetChartId(activeChartId ?? null);
-    setActivePanel("db");
+    setLeftPanel((p) => (p === "db" ? null : "db"));
   };
 
   const openFieldsPanel = () => {
-    setActivePanel("fields");
+    setFieldsPanelOpen((v) => !v);
   };
 
   const openFiltersPanel = () => {
-    setActivePanel("filters");
+    setFiltersPanelOpen((v) => !v);
   };
 
   const openVisualizationsPanel = () => {
-    setActivePanel("visualizations");
-  };
-
-  const openFieldsAndFilters = () => {
-    setActivePanel("fields");
+    setVisualizationsPanelOpen((v) => !v);
   };
 
   const handleScreenshot = () => {
-    // Функция для создания скриншота
-    // TODO: Реализовать скриншот canvas
-    console.log('Screenshot requested');
+    // Placeholder action until screenshot export is implemented.
   };
 
   const handleSave = () => {
@@ -529,6 +569,18 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
         },
       })
     );
+  };
+
+  const handleClearAllFilters = () => {
+    window.dispatchEvent(
+      new CustomEvent("dashboard:bi-filters-changed", {
+        detail: {
+          filters: [],
+          version: Number(biFilterVersion ?? 0) + 1,
+        },
+      })
+    );
+    window.dispatchEvent(new CustomEvent("dashboard:reset-slicers"));
   };
 
   const applySemanticTestQuery = () => {
@@ -666,13 +718,13 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
         case '1':
           e.preventDefault();
           setIsMenuVisible(true);
-          setActivePanel((prev) => (prev === "library" ? null : "library"));
+          setLeftPanel((prev) => (prev === "library" ? null : "library"));
           return;
         case '2':
           e.preventDefault();
           setIsMenuVisible(true);
           setTargetChartId(activeChartIdRef.current ?? null);
-          setActivePanel("db");
+          setLeftPanel((prev) => (prev === "db" ? null : "db"));
           return;
         case '3':
           e.preventDefault();
@@ -838,7 +890,7 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
 
               <button
                 type="button"
-                onClick={() => toggle("library")}
+                onClick={() => toggleLibrary()}
                 className="w-10 h-10 rounded-full flex items-center justify-center text-slate-200 hover:bg-white/10 transition-all"
                 title={openPanel === "library" ? "Закрыть библиотеку (1)" : "Открыть библиотеку (1)"}
               >
@@ -957,11 +1009,31 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
 
                   <button
                     type="button"
+                    onClick={() => setEditInteractionsMode((v) => !v)}
+                    className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
+                      editInteractionsMode ? 'text-sky-300 bg-sky-500/20' : 'text-slate-200 hover:bg-white/10'
+                    }`}
+                    title={editInteractionsMode ? "Disable edit interactions" : "Enable edit interactions"}
+                  >
+                    <Map className="w-5 h-5" />
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={handleSave}
                     className="w-10 h-10 rounded-full flex items-center justify-center text-slate-200 hover:bg-white/10 transition-all"
                     title="Сохранить (7)"
                   >
                     <Save className="w-5 h-5" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleClearAllFilters}
+                    className="w-10 h-10 rounded-full flex items-center justify-center text-slate-200 hover:bg-white/10 transition-all"
+                    title="Clear all filters"
+                  >
+                    <RefreshCw className="w-5 h-5" />
                   </button>
 
                   {!!activeChartId && (
@@ -1059,7 +1131,7 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
             exit={{ x: "-100%", opacity: 0 }}
             transition={spring}
           >
-            <ChartLibrarySlideIn onClose={() => setActivePanel(null)} />
+            <ChartLibrarySlideIn onClose={() => setLeftPanel(null)} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1075,7 +1147,7 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
             exit={{ x: "-100%", opacity: 0 }}
             transition={spring}
           >
-            <DbSlideInPanel onClose={() => setActivePanel(null)} targetChartId={targetChartId} />
+            <DbSlideInPanel onClose={() => setLeftPanel(null)} targetChartId={targetChartId} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1089,10 +1161,9 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
             style={(() => {
               const base = (isChartConfigOpen ? (CHART_CONFIG_PANEL_WIDTH + RIGHT_PANEL_GAP) : 0);
               const filtersW = (isFiltersPanelOpen ? filtersPanelWidth : 0);
-              const vizW = (isVisualizationsPanelOpen ? visualizationsPanelWidth : 0);
               const extraFilters = (filtersW ? (filtersW + RIGHT_PANEL_GAP) : 0);
-              const extraViz = (vizW ? (vizW + RIGHT_PANEL_GAP) : 0);
-              const right = base + extraFilters + extraViz;
+              // Fields sits to the left of Visualizations (closer to canvas); do not add viz width here.
+              const right = base + extraFilters;
               return right > 0 ? ({ right } as any) : undefined;
             })()}
             initial={{ x: "100%", opacity: 0 }}
@@ -1100,7 +1171,7 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
             exit={{ x: "100%", opacity: 0 }}
             transition={spring}
           >
-            <FieldsSlideInPanel onClose={() => setActivePanel(null)} />
+            <FieldsSlideInPanel onClose={() => setFieldsPanelOpen(false)} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1115,7 +1186,8 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
               const base = (isChartConfigOpen ? (CHART_CONFIG_PANEL_WIDTH + RIGHT_PANEL_GAP) : 0);
               const filtersW = (isFiltersPanelOpen ? filtersPanelWidth : 0);
               const extraFilters = (filtersW ? (filtersW + RIGHT_PANEL_GAP) : 0);
-              const right = base + extraFilters;
+              const fieldsW = (isFieldsPanelOpen ? fieldsPanelWidth + RIGHT_PANEL_GAP : 0);
+              const right = base + extraFilters + fieldsW;
               return right > 0 ? ({ right } as any) : undefined;
             })()}
             initial={{ x: "100%", opacity: 0 }}
@@ -1123,7 +1195,7 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
             exit={{ x: "100%", opacity: 0 }}
             transition={spring}
           >
-            <VisualizationsSlideInPanel onClose={() => setActivePanel(null)} />
+            <VisualizationsSlideInPanel onClose={() => setVisualizationsPanelOpen(false)} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1140,7 +1212,7 @@ export function DashboardDock({ activeChartId, onResetZoom }: {
             exit={{ x: "100%", opacity: 0 }}
             transition={spring}
           >
-            <FiltersSlideInPanel onClose={() => setActivePanel(null)} />
+            <FiltersSlideInPanel onClose={() => setFiltersPanelOpen(false)} />
           </motion.div>
         )}
       </AnimatePresence>

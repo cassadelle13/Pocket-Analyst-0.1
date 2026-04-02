@@ -161,7 +161,7 @@ export const ChartTemplate = forwardRef<any, ChartTemplateProps>(({
         };
 
         // Стили в зависимости от типа
-        if (s.type === 'line' || !s.type) {
+        if (s.type === 'line' || s.type === 'area' || !s.type) {
           return {
             ...baseSeries,
             smooth: ChartStyleConfig.series.line.smooth,

@@ -1,4 +1,5 @@
 import { createFullFunctionRegistry, getFormulaFunctionByName } from "../formulaRegistry";
+import { test } from "vitest";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -93,4 +94,6 @@ function main() {
   console.log("formula registry suite: OK");
 }
 
-main();
+test("formula registry suite", () => {
+  main();
+});

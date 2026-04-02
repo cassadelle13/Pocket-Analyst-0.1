@@ -1,11 +1,12 @@
 "use client";
 
-import { Layers, Plus, Loader2, RefreshCw, Search, Calendar, Hash, Database } from "lucide-react";
+import { Layers, Plus, Loader2, RefreshCw, Search, Calendar, Database, Table2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useConnectionState } from "../../providers";
 import { useSemanticModel } from "../../context/SemanticModelContext";
 import { SchemaIntelligenceService } from "../../lib/schema-intelligence";
+import { wellsToLogicalQuery } from "../../lib/semantic/wellsToLogicalQuery";
 import type { SemanticModel } from "../../lib/schema-intelligence";
 import type { SemanticModelV1 } from "../../lib/semantic/types";
 
@@ -29,16 +30,6 @@ type ColumnMappingLike = {
   drilldownColumns?: string[];
   details2Columns?: string[];
   colorByMeasure?: boolean;
-};
-
-type CalendarGranularity = "day" | "week" | "month" | "quarter" | "year";
-
-type SyntheticField = {
-  name: string;
-  table: string;
-  type: string;
-  sourceType: "timeField" | "dimension" | "measure";
-  __calendar?: { granularity: CalendarGranularity };
 };
 
 function toFieldRef(field: { name: string; table: string }): string {
@@ -69,8 +60,22 @@ function resolveSemanticRef(
   if (!modelsObj || typeof modelsObj !== "object") return "";
 
   const modelName = safeKey(t);
-  const mdl = modelName ? (modelsObj as any)[modelName] : null;
+  let mdl = modelName ? (modelsObj as any)[modelName] : null;
+  if (!mdl || typeof mdl !== "object") {
+    mdl = (modelsObj as any)[t] ?? null;
+  }
+  if (!mdl || typeof mdl !== "object") {
+    const lc = t.toLowerCase();
+    const match = Object.keys(modelsObj).find((k) => k.toLowerCase() === lc || safeKey(k).toLowerCase() === lc);
+    mdl = match ? (modelsObj as any)[match] : null;
+  }
   if (!mdl || typeof mdl !== "object") return "";
+  const resolvedModelName = (() => {
+    if (modelName && (modelsObj as any)[modelName]) return modelName;
+    if ((modelsObj as any)[t]) return t;
+    const lc = t.toLowerCase();
+    return Object.keys(modelsObj).find((k) => k.toLowerCase() === lc || safeKey(k).toLowerCase() === lc) ?? t;
+  })();
 
   const dims = mdl?.dimensions && typeof mdl.dimensions === "object" ? Object.keys(mdl.dimensions) : [];
   const meas = mdl?.measures && typeof mdl.measures === "object" ? Object.keys(mdl.measures) : [];
@@ -79,11 +84,11 @@ function resolveSemanticRef(
 
   const key = safeKey(c) || c;
   const direct = all.find((k) => k === c) || all.find((k) => k === key);
-  if (direct) return `${modelName}.${direct}`;
+  if (direct) return `${resolvedModelName}.${direct}`;
 
   const lc = c.toLowerCase();
   const ci = all.find((k) => String(k).toLowerCase() === lc);
-  if (ci) return `${modelName}.${ci}`;
+  if (ci) return `${resolvedModelName}.${ci}`;
   return "";
 }
 
@@ -180,6 +185,20 @@ export function FieldsSlideInPanel({
   const [schemaError, setSchemaError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  /** Default: only tables/columns from the active DB connection. "full" adds semantic model (when not demo placeholder) and Advanced. */
+  const [fieldsSource, setFieldsSource] = useState<"physical" | "full">(() => {
+    try {
+      const v = String(window.localStorage.getItem("dashboard:fieldsSource") ?? "").trim();
+      if (v === "full") return "full";
+    } catch {}
+    return "physical";
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("dashboard:fieldsSource", fieldsSource);
+    } catch {}
+  }, [fieldsSource]);
 
   const hasSemanticFields = useMemo(() => {
     const m = semanticModelV1Local as any;
@@ -195,6 +214,15 @@ export function FieldsSlideInPanel({
       if (dimsCnt + measCnt > 0) return true;
     }
     return false;
+  }, [semanticModelV1Local]);
+
+  /** Legacy demo binding: single model named "events" — not shown in Fields (use physical schema / bootstrap). */
+  const isDemoSemanticPlaceholder = useMemo(() => {
+    const m = semanticModelV1Local as any;
+    const modelsObj = m?.models;
+    if (!modelsObj || typeof modelsObj !== "object") return false;
+    const keys = Object.keys(modelsObj);
+    return keys.length === 1 && keys[0] === "events";
   }, [semanticModelV1Local]);
 
   const { setSemanticModelV1 } = useSemanticModel();
@@ -242,7 +270,8 @@ export function FieldsSlideInPanel({
   const fieldParametersList = useMemo(() => {
     const a = (semanticArtifacts && typeof semanticArtifacts === "object") ? semanticArtifacts : null;
     const fps = a && a.fieldParameters && typeof a.fieldParameters === "object" ? a.fieldParameters : null;
-    if (!fps) return [] as Array<{ id: string; name: string; kind: FieldParameterKind; count: number }>;
+    const sels = a && a.fieldParameterSelections && typeof a.fieldParameterSelections === "object" ? a.fieldParameterSelections : null;
+    if (!fps) return [] as Array<{ id: string; name: string; kind: FieldParameterKind; count: number; defaultRef: string }>;
     return Object.keys(fps)
       .map((k) => {
         const fp = (fps as any)[k];
@@ -250,7 +279,9 @@ export function FieldsSlideInPanel({
         const name = String(fp?.name ?? id).trim() || id;
         const kind: FieldParameterKind = (String(fp?.kind ?? "measure") === "dimension") ? "dimension" : "measure";
         const count = Array.isArray(fp?.items) ? fp.items.length : 0;
-        return { id, name, kind, count };
+        const fromSel = String((sels as any)?.[id]?.ref ?? (sels as any)?.[String(id).toLowerCase()]?.ref ?? "").trim();
+        const fromItems = Array.isArray(fp?.items) ? String(fp.items.find((x: any) => String(x?.ref ?? "").trim())?.ref ?? "").trim() : "";
+        return { id, name, kind, count, defaultRef: fromSel || fromItems };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [semanticArtifacts]);
@@ -367,6 +398,100 @@ export function FieldsSlideInPanel({
     setNewParamValues("");
   };
 
+  const editListParameter = (id: string) => {
+    const key = String(id ?? "").trim();
+    if (!key || !semanticArtifacts || typeof semanticArtifacts !== "object") return;
+    const p = (semanticArtifacts as any)?.parameters?.[key];
+    if (!p || typeof p !== "object") return;
+    const currentName = String(p?.name ?? key).trim() || key;
+    const currentValues = Array.isArray(p?.values) ? p.values.map((v: any) => String(v)).join(", ") : "";
+    const nextName = window.prompt("Parameter name", currentName);
+    if (nextName == null) return;
+    const nextValuesRaw = window.prompt("Values (comma/newline separated)", currentValues);
+    if (nextValuesRaw == null) return;
+    const nextValues = parseValues(nextValuesRaw);
+    const base = ((semanticArtifacts as any)?.parameters && typeof (semanticArtifacts as any).parameters === "object")
+      ? (semanticArtifacts as any).parameters
+      : {};
+    const nextParams = {
+      ...base,
+      [key]: {
+        ...p,
+        id: key,
+        name: String(nextName).trim() || currentName,
+        values: nextValues,
+      },
+    };
+    window.dispatchEvent(new CustomEvent("dashboard:update-semantic-artifacts", { detail: { patch: { parameters: nextParams } } }));
+  };
+
+  const deleteListParameter = (id: string) => {
+    const key = String(id ?? "").trim();
+    if (!key || !semanticArtifacts || typeof semanticArtifacts !== "object") return;
+    if (!window.confirm(`Delete parameter "${key}"?`)) return;
+    const base = ((semanticArtifacts as any)?.parameters && typeof (semanticArtifacts as any).parameters === "object")
+      ? (semanticArtifacts as any).parameters
+      : {};
+    const nextEntries = Object.keys(base)
+      .filter((k) => k !== key)
+      .reduce((acc: Record<string, any>, k) => {
+        acc[k] = (base as any)[k];
+        return acc;
+      }, {});
+    window.dispatchEvent(new CustomEvent("dashboard:update-semantic-artifacts", { detail: { patch: { parameters: nextEntries } } }));
+  };
+
+  const editFieldParameter = (id: string) => {
+    const key = String(id ?? "").trim();
+    if (!key || !semanticArtifacts || typeof semanticArtifacts !== "object") return;
+    const fp = (semanticArtifacts as any)?.fieldParameters?.[key];
+    if (!fp || typeof fp !== "object") return;
+    const currentName = String(fp?.name ?? key).trim() || key;
+    const currentKind = String(fp?.kind ?? "measure") === "dimension" ? "dimension" : "measure";
+    const currentRefs = Array.isArray(fp?.items)
+      ? fp.items.map((x: any) => String(x?.ref ?? "").trim()).filter(Boolean).join("\n")
+      : "";
+    const nextName = window.prompt("Field parameter name", currentName);
+    if (nextName == null) return;
+    const nextKindRaw = window.prompt("Kind (measure|dimension)", currentKind);
+    if (nextKindRaw == null) return;
+    const nextRefsRaw = window.prompt("Refs (Model.field, comma/newline)", currentRefs);
+    if (nextRefsRaw == null) return;
+    const nextRefs = parseRefs(nextRefsRaw);
+    if (nextRefs.length === 0) return;
+    const nextKind: FieldParameterKind = String(nextKindRaw).trim() === "dimension" ? "dimension" : "measure";
+    const base = ((semanticArtifacts as any)?.fieldParameters && typeof (semanticArtifacts as any).fieldParameters === "object")
+      ? (semanticArtifacts as any).fieldParameters
+      : {};
+    const nextFieldParams = {
+      ...base,
+      [key]: {
+        ...fp,
+        id: key,
+        name: String(nextName).trim() || currentName,
+        kind: nextKind,
+        items: nextRefs.map((ref, idx) => ({ ref, label: ref, order: idx })),
+      },
+    };
+    window.dispatchEvent(new CustomEvent("dashboard:update-semantic-artifacts", { detail: { patch: { fieldParameters: nextFieldParams } } }));
+  };
+
+  const deleteFieldParameter = (id: string) => {
+    const key = String(id ?? "").trim();
+    if (!key || !semanticArtifacts || typeof semanticArtifacts !== "object") return;
+    if (!window.confirm(`Delete field parameter "${key}"?`)) return;
+    const base = ((semanticArtifacts as any)?.fieldParameters && typeof (semanticArtifacts as any).fieldParameters === "object")
+      ? (semanticArtifacts as any).fieldParameters
+      : {};
+    const nextEntries = Object.keys(base)
+      .filter((k) => k !== key)
+      .reduce((acc: Record<string, any>, k) => {
+        acc[k] = (base as any)[k];
+        return acc;
+      }, {});
+    window.dispatchEvent(new CustomEvent("dashboard:update-semantic-artifacts", { detail: { patch: { fieldParameters: nextEntries } } }));
+  };
+
   useEffect(() => {
     const pid = String(effectiveProjectId ?? "").trim();
     if (!pid) {
@@ -420,14 +545,9 @@ export function FieldsSlideInPanel({
   };
 
   useEffect(() => {
-    // Semantic-first: only load raw schema when we cannot render from semantic model.
+    // Always load physical schema when a connection exists, even if a semantic model is bound,
+    // so Direct SQL charts can map axes to real table.column refs from introspection.
     if (!activeConnection?.id) {
-      setSemanticModel(null);
-      setSchemaError(null);
-      setSchemaLoading(false);
-      return;
-    }
-    if (hasSemanticFields) {
       setSemanticModel(null);
       setSchemaError(null);
       setSchemaLoading(false);
@@ -435,7 +555,7 @@ export function FieldsSlideInPanel({
     }
     void loadSchema();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeConnection?.id, hasSemanticFields]);
+  }, [activeConnection?.id]);
 
   useEffect(() => {
     const onActiveChartId = (e: Event) => {
@@ -474,19 +594,14 @@ export function FieldsSlideInPanel({
 
     window.addEventListener("dashboard:active-chart-id", onActiveChartId as EventListener);
     window.addEventListener("dashboard:update-chart-data", onChartDataPatched as EventListener);
+    try {
+      window.dispatchEvent(new CustomEvent("dashboard:request-active-chart"));
+    } catch {}
     return () => {
       window.removeEventListener("dashboard:active-chart-id", onActiveChartId as EventListener);
       window.removeEventListener("dashboard:update-chart-data", onChartDataPatched as EventListener);
     };
   }, []);
-
-  const activeTime = useMemo(() => {
-    const q = (activeChartData && typeof activeChartData === "object") ? (activeChartData as any).logicalQuery : null;
-    const t = (q && typeof q === "object") ? (q as any).time : null;
-    const dim = t && typeof t === "object" ? String((t as any).dimension ?? "").trim() : "";
-    const gran = t && typeof t === "object" ? String((t as any).granularity ?? "").trim() : "";
-    return { dimension: dim, granularity: gran };
-  }, [activeChartData]);
 
   const selectedKeys = useMemo(() => {
     const m = activeChartMapping;
@@ -495,8 +610,15 @@ export function FieldsSlideInPanel({
       const s = String(v ?? "").trim();
       if (s) set.add(s);
     };
+    const lq = ((activeChartData as any)?.logicalQuery && typeof (activeChartData as any).logicalQuery === "object")
+      ? (activeChartData as any).logicalQuery
+      : null;
+    for (const d of Array.isArray((lq as any)?.dimensions) ? (lq as any).dimensions : []) add(d);
+    for (const mm of Array.isArray((lq as any)?.measures) ? (lq as any).measures : []) add(mm);
+    const slicerFieldRef = String((activeChartData as any)?.slicer?.fieldRef ?? "").trim();
+    if (slicerFieldRef) set.add(slicerFieldRef);
     if (!m) return set;
-    add(m.xColumn);
+    add((m as any).xColumn);
     // Build/SQL mapping may use groupBy as categorical axis.
     add(m.groupBy);
     for (const yy of Array.isArray(m.yColumns) ? m.yColumns : []) {
@@ -509,106 +631,28 @@ export function FieldsSlideInPanel({
     for (const d2 of Array.isArray((m as any).details2Columns) ? (m as any).details2Columns : []) add(d2);
     if ((m as any)?.colorByMeasure) add("__measureNames__");
     return set;
-  }, [activeChartMapping]);
+  }, [activeChartMapping, activeChartData]);
 
-  const bestTimeFieldRef = useMemo(() => {
-    const m = activeChartMapping;
-    const x = String(m?.xColumn ?? "").trim();
-    const timeFields = Array.isArray((semanticModel as any)?.timeFields) ? (semanticModel as any).timeFields : [];
-    const isTime = (ref: string) => {
-      if (!ref) return false;
-      const idx = ref.indexOf(".");
-      const t = idx > 0 ? ref.slice(0, idx) : "";
-      const n = idx > 0 ? ref.slice(idx + 1) : ref;
-      return timeFields.some((f: any) => String(f?.table ?? "").trim() === t && String(f?.name ?? "").trim() === n);
-    };
-
-    if (x && isTime(x)) return x;
-    const first = timeFields[0];
-    if (first && typeof first === "object") {
-      const t = String((first as any).table ?? "").trim();
-      const n = String((first as any).name ?? "").trim();
-      if (t && n) return `${t}.${n}`;
+  /** Columns from the DB table bound to the active chart (Connect to chart). Plain names for Visualizations → Axis / Y when they match SQL output. */
+  const chartBoundSqlColumns = useMemo(() => {
+    const cd = activeChartData;
+    if (!cd || String((cd as any).kind ?? "").trim() !== "db-table") {
+      return [] as Array<{ name: string; ref: string; fieldType: "dimension" | "measure" | "time"; typeLabel: string }>;
     }
-    return "";
-  }, [activeChartMapping, semanticModel]);
-
-  const axisTimeBaseRef = useMemo(() => {
-    // Prefer semantic model default time dimension for the chart's sourceModel.
-    const q = (activeChartData && typeof activeChartData === "object") ? (activeChartData as any).logicalQuery : null;
-    const sourceModel = q && typeof q === "object" ? String((q as any).sourceModel ?? "").trim() : "";
-    if (sourceModel && semanticModelV1Local && typeof semanticModelV1Local === "object") {
-      const mdl = (semanticModelV1Local as any)?.models?.[sourceModel];
-      const dt = mdl && typeof mdl === "object" ? String((mdl as any).defaultTimeDimension ?? "").trim() : "";
-      if (dt) return `${sourceModel}.${dt}`;
+    const cm = (cd as any).columnsMeta;
+    if (!Array.isArray(cm) || cm.length === 0) return [];
+    const out: Array<{ name: string; ref: string; fieldType: "dimension" | "measure" | "time"; typeLabel: string }> = [];
+    for (const c of cm) {
+      const name = String((c as any)?.name ?? "").trim();
+      if (!name) continue;
+      const t = String((c as any)?.type ?? "").toLowerCase();
+      const isNum = /int|numeric|decimal|float|double|real|serial|money|bigint/.test(t);
+      const isTime = /date|time/.test(t);
+      const fieldType: "dimension" | "measure" | "time" = isTime ? "time" : isNum ? "measure" : "dimension";
+      out.push({ name, ref: name, fieldType, typeLabel: t || "string" });
     }
-    // Fallback to schema-derived time field.
-    return String(bestTimeFieldRef ?? "").trim();
-  }, [activeChartData, semanticModelV1Local, bestTimeFieldRef]);
-
-  const applyCalendarGranularity = (g: CalendarGranularity) => {
-    const cid = String(activeChartId ?? "").trim();
-    if (!cid) return;
-
-    const dim = String(axisTimeBaseRef ?? "").trim();
-    if (!dim) return;
-
-    window.dispatchEvent(
-      new CustomEvent("dashboard:update-chart-data", {
-        detail: {
-          chartId: cid,
-          patch: {
-            logicalQuery: {
-              time: { dimension: dim, granularity: g },
-            },
-          },
-        },
-      })
-    );
-  };
-
-  const clearCalendarTime = () => {
-    const cid = String(activeChartId ?? "").trim();
-    if (!cid) return;
-    window.dispatchEvent(
-      new CustomEvent("dashboard:update-chart-data", {
-        detail: {
-          chartId: cid,
-          patch: {
-            logicalQuery: {
-              time: null,
-            },
-          },
-        },
-      })
-    );
-  };
-
-  const calendarFields: SyntheticField[] = useMemo(() => {
-    const base = String(axisTimeBaseRef ?? "").trim();
-    if (!base) return [];
-    const table = "Calendar";
-    return [
-      { name: "STARTOFYEAR()", table, type: "time", sourceType: "timeField", __calendar: { granularity: "year" } },
-      { name: "STARTOFQUARTER()", table, type: "time", sourceType: "timeField", __calendar: { granularity: "quarter" } },
-      { name: "STARTOFMONTH()", table, type: "time", sourceType: "timeField", __calendar: { granularity: "month" } },
-      { name: "STARTOFWEEK()", table, type: "time", sourceType: "timeField", __calendar: { granularity: "week" } },
-      { name: "DATE()", table, type: "time", sourceType: "timeField", __calendar: { granularity: "day" } },
-    ];
-  }, [axisTimeBaseRef]);
-
-  const toggleSyntheticField = (f: SyntheticField) => {
-    if (f.__calendar) {
-      const base = String(axisTimeBaseRef ?? "").trim();
-      const g = f.__calendar.granularity;
-      const already = base && activeTime.dimension === base && activeTime.granularity === g;
-      if (already) {
-        clearCalendarTime();
-      } else {
-        applyCalendarGranularity(g);
-      }
-    }
-  };
+    return out;
+  }, [activeChartData]);
 
   const toggleField = (field: { name: string; table: string; type: string }, sourceType: "timeField" | "dimension" | "measure") => {
     const cid = String(activeChartId ?? "").trim();
@@ -630,8 +674,39 @@ export function FieldsSlideInPanel({
     const col = semanticRef || legacyRef;
     if (!col) return;
 
-    const prev = (activeChartMapping && typeof activeChartMapping === "object") ? activeChartMapping : ({} as ColumnMappingLike);
     const isSelected = selectedKeys.has(col) || (!!legacyRef && selectedKeys.has(legacyRef));
+    const activeKind = String((activeChartData as any)?.kind ?? "").trim().toLowerCase();
+    const isSlicer = activeKind === "slicer" || String((activeChartData as any)?.name ?? "").trim().toLowerCase() === "slicer";
+
+    if (isSlicer) {
+      const currentSlicer = ((activeChartData as any)?.slicer && typeof (activeChartData as any).slicer === "object")
+        ? (activeChartData as any).slicer
+        : {};
+      window.dispatchEvent(
+        new CustomEvent("dashboard:update-chart-data", {
+          detail: {
+            chartId: cid,
+            patch: {
+              kind: "slicer",
+              slicer: {
+                ...currentSlicer,
+                fieldRef: isSelected ? "" : col,
+              },
+            },
+          },
+        })
+      );
+      return;
+    }
+
+    const prev = (activeChartMapping && typeof activeChartMapping === "object") ? activeChartMapping : ({} as ColumnMappingLike);
+    const effectiveVizType = (() => {
+      const cfg = String((activeChartData as any)?.chartConfig?.general?.vizType ?? "").trim().toLowerCase();
+      const legacy = String((activeChartData as any)?.__forceVizType ?? "").trim().toLowerCase();
+      const v = cfg || legacy;
+      return (v || "line") as any;
+    })();
+    const sourceModel = String((activeChartData as any)?.logicalQuery?.sourceModel ?? "").trim();
 
     if (isSelected) {
       const next: any = { ...prev };
@@ -651,9 +726,24 @@ export function FieldsSlideInPanel({
         });
         if (next.yColumns.length === 0) delete next.yColumns;
       }
+      const nextLogicalQuery = wellsToLogicalQuery({
+        vizType: effectiveVizType,
+        mapping: next,
+        sourceModel,
+        semanticModel: semanticModelV1Local,
+        prevLogicalQuery: ((activeChartData as any)?.logicalQuery && typeof (activeChartData as any).logicalQuery === "object")
+          ? (activeChartData as any).logicalQuery
+          : undefined,
+      });
       window.dispatchEvent(
         new CustomEvent("dashboard:update-chart-data", {
-          detail: { chartId: activeChartId, patch: { columnMapping: next } },
+          detail: {
+            chartId: activeChartId,
+            patch: {
+              columnMapping: next,
+              ...(nextLogicalQuery ? { logicalQuery: nextLogicalQuery } : {}),
+            },
+          },
         })
       );
       return;
@@ -683,9 +773,24 @@ export function FieldsSlideInPanel({
       }
     }
 
+    const nextLogicalQuery = wellsToLogicalQuery({
+      vizType: effectiveVizType,
+      mapping: next,
+      sourceModel,
+      semanticModel: semanticModelV1Local,
+      prevLogicalQuery: ((activeChartData as any)?.logicalQuery && typeof (activeChartData as any).logicalQuery === "object")
+        ? (activeChartData as any).logicalQuery
+        : undefined,
+    });
     window.dispatchEvent(
       new CustomEvent("dashboard:update-chart-data", {
-        detail: { chartId: cid, patch: { columnMapping: next } },
+        detail: {
+          chartId: cid,
+          patch: {
+            columnMapping: next,
+            ...(nextLogicalQuery ? { logicalQuery: nextLogicalQuery } : {}),
+          },
+        },
       })
     );
   };
@@ -759,15 +864,37 @@ export function FieldsSlideInPanel({
   const hasSearchResults = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
     if (!term) return true;
-    const semanticHits = semanticTree.reduce((acc, t) => acc + t.dimensions.length + t.measures.length, 0);
+
+    if (fieldsSource === "physical") {
+      const match = (name: string, table: string) => {
+        const n = String(name ?? "").toLowerCase();
+        const t = String(table ?? "").toLowerCase();
+        return n.includes(term) || t.includes(term);
+      };
+      let physicalHits = 0;
+      if (filteredModel) {
+        for (const f of filteredModel.timeFields ?? []) {
+          if (match(f.name, f.table)) physicalHits += 1;
+        }
+        for (const f of filteredModel.dimensions ?? []) {
+          if (match(f.name, f.table)) physicalHits += 1;
+        }
+        for (const f of filteredModel.measures ?? []) {
+          if (match(f.name, f.table)) physicalHits += 1;
+        }
+      }
+      const boundHits = chartBoundSqlColumns.filter(
+        (c) => String(c.ref).toLowerCase().includes(term) || String(c.name).toLowerCase().includes(term)
+      ).length;
+      return physicalHits + boundHits > 0;
+    }
+
+    const semanticHits = isDemoSemanticPlaceholder
+      ? 0
+      : semanticTree.reduce((acc, t) => acc + t.dimensions.length + t.measures.length, 0);
     const basicHits = (filteredModel?.timeFields?.length ?? 0) + (filteredModel?.dimensions?.length ?? 0) + (filteredModel?.measures?.length ?? 0);
-    const calendarHits = (calendarFields ?? []).filter((f) => {
-      const n = String(f.name ?? "").toLowerCase();
-      const tbl = String(f.table ?? "").toLowerCase();
-      return n.includes(term) || tbl.includes(term);
-    }).length;
-    return semanticHits + basicHits + calendarHits > 0;
-  }, [searchTerm, semanticTree, filteredModel, calendarFields]);
+    return semanticHits + basicHits > 0;
+  }, [searchTerm, semanticTree, filteredModel, fieldsSource, chartBoundSqlColumns, isDemoSemanticPlaceholder]);
 
   return (
     <div className="h-full p-4" style={{ width: panelWidth }}>
@@ -793,7 +920,37 @@ export function FieldsSlideInPanel({
               <Layers className="w-4 h-4 text-blue-400" />
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-white truncate">Fields</div>
-                <div className="text-xs text-slate-400 truncate">Data (PowerBI-like)</div>
+                <div className="text-xs text-slate-400 truncate">
+                  {fieldsSource === "physical"
+                    ? "Connected database (physical schema)"
+                    : "Semantic model (if bound), DB schema, Advanced parameters"}
+                </div>
+                <div className="flex flex-wrap gap-1 mt-2" role="group" aria-label="Fields source">
+                  <button
+                    type="button"
+                    onClick={() => setFieldsSource("physical")}
+                    className={`px-2 py-1 rounded-lg border text-[10px] font-semibold transition ${
+                      fieldsSource === "physical"
+                        ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-100"
+                        : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                    }`}
+                    title="Only tables and columns from the active connection"
+                  >
+                    Database
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFieldsSource("full")}
+                    className={`px-2 py-1 rounded-lg border text-[10px] font-semibold transition ${
+                      fieldsSource === "full"
+                        ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-100"
+                        : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                    }`}
+                    title="Semantic model (non-demo), physical schema, Advanced parameters"
+                  >
+                    Full
+                  </button>
+                </div>
               </div>
             </div>
             <button
@@ -829,6 +986,89 @@ export function FieldsSlideInPanel({
 
             {activeChartId && (
               <>
+            {chartBoundSqlColumns.length > 0 && (
+              <div className="rounded-2xl border border-sky-500/25 bg-sky-500/10 p-3 space-y-2">
+                <div className="text-[11px] font-semibold text-sky-200/90 uppercase tracking-wider">
+                  Bound table columns
+                </div>
+                <p className="text-[10px] text-slate-500 leading-snug">
+                  From the table you attached with <span className="font-semibold text-slate-400">Connect to chart</span>. Drag into Visualizations → Axis (X) / Y when your SQL uses the same column names. Aliases only in SQL (e.g. <span className="font-mono text-slate-400">day</span>) are not listed here — set those in Chart configuration or use a matching alias.
+                </p>
+                <div className="space-y-1">
+                  {chartBoundSqlColumns.map((c) => (
+                    <div
+                      key={`bound.${c.ref}`}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.effectAllowed = "copy";
+                        e.dataTransfer.setData(
+                          "application/json",
+                          JSON.stringify({
+                            ref: c.ref,
+                            name: c.name,
+                            fieldType: c.fieldType,
+                            semanticType: c.typeLabel,
+                          })
+                        );
+                      }}
+                      className="flex items-center justify-between gap-2 px-2 py-2 rounded-lg hover:bg-white/10 transition-colors cursor-grab active:cursor-grabbing border border-white/5"
+                      title={`Drag to Visualizations (ref: ${c.ref})`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Database className="w-3.5 h-3.5 text-sky-300 shrink-0" />
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-white truncate font-mono">{c.ref}</div>
+                        </div>
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-mono shrink-0">{c.fieldType}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {fieldsSource === "physical" ? (
+              <>
+                {!activeConnection?.id && (
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <div className="text-sm font-semibold text-white">No active connection</div>
+                    <div className="text-xs text-slate-400 mt-1">
+                      Connect a DB first (use DB Explorer). Then fields will appear here.
+                    </div>
+                  </div>
+                )}
+
+                {!!activeConnection?.id && schemaLoading && (
+                  <div className="flex items-center gap-2 text-sm text-slate-400">
+                    <Loader2 className="w-4 h-4 animate-spin" /> Loading schema...
+                  </div>
+                )}
+
+                {!!activeConnection?.id && schemaError && !schemaLoading && (
+                  <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-200">
+                    {schemaError}
+                  </div>
+                )}
+
+                {!!activeConnection?.id && !schemaLoading && !schemaError && filteredModel && (
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Database tables</div>
+                    <PowerBIFieldTree
+                      model={filteredModel}
+                      semanticModelV1Local={semanticModelV1Local}
+                      selectedKeys={selectedKeys}
+                      onToggle={toggleField}
+                    />
+                  </div>
+                )}
+
+                {!!activeConnection?.id && !schemaLoading && !schemaError && !filteredModel && (
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <div className="text-sm text-slate-400">No schema loaded</div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
             <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
               <button
                 type="button"
@@ -839,93 +1079,8 @@ export function FieldsSlideInPanel({
                 <div className="text-xs text-slate-300">{showAdvanced ? "Hide" : "Show"}</div>
               </button>
             </div>
-            {!!axisTimeBaseRef && (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider" title="Time bucketing helper for chart X axis">
-                    Date Granularity
-                  </div>
-                  <button
-                    type="button"
-                    onClick={clearCalendarTime}
-                    className="h-8 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-slate-200"
-                    title="Clear time grain"
-                  >
-                    Clear
-                  </button>
-                </div>
 
-                <div className="mt-2 text-[11px] text-slate-500 font-mono truncate">
-                  base: {String(axisTimeBaseRef ?? "").trim()}
-                </div>
-
-                <div className="mt-3 grid grid-cols-5 gap-2">
-                  {([
-                    { k: "year", label: "STARTOFYEAR" },
-                    { k: "quarter", label: "STARTOFQUARTER" },
-                    { k: "month", label: "STARTOFMONTH" },
-                    { k: "week", label: "STARTOFWEEK" },
-                    { k: "day", label: "DATE" },
-                  ] as Array<{ k: CalendarGranularity; label: string }>).map((it) => {
-                    const checked = !!axisTimeBaseRef && activeTime.dimension === axisTimeBaseRef && activeTime.granularity === it.k;
-                    return (
-                      <button
-                        key={it.k}
-                        type="button"
-                        onClick={() => {
-                          if (checked) clearCalendarTime();
-                          else applyCalendarGranularity(it.k);
-                        }}
-                        className={`h-9 rounded-xl border text-[11px] font-semibold transition ${
-                          checked
-                            ? "bg-emerald-500/20 border-emerald-400/30 text-emerald-100"
-                            : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/10"
-                        }`}
-                        title={checked ? "Remove" : "Apply"}
-                      >
-                        {it.label}()
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div className="mt-3 space-y-1">
-                  {calendarFields.map((f) => (
-                    <div
-                      key={`xhelper.${f.name}`}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.effectAllowed = "copy";
-                        e.dataTransfer.setData(
-                          "application/json",
-                          JSON.stringify({
-                            synthetic: "calendar",
-                            granularity: f.__calendar?.granularity,
-                            baseTimeRef: String(axisTimeBaseRef ?? "").trim(),
-                            name: f.name,
-                            table: f.table,
-                            type: f.type,
-                            sourceType: "timeField",
-                          })
-                        );
-                      }}
-                      className="flex items-center justify-between gap-2 px-2 py-2 rounded-lg hover:bg-white/10 transition-colors cursor-grab active:cursor-grabbing"
-                      title="Drag to Axis (X)"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Calendar className="w-3.5 h-3.5 text-purple-300" />
-                        <div className="min-w-0">
-                          <div className="text-xs font-semibold text-white truncate">{f.name}</div>
-                        </div>
-                      </div>
-                      <div className="text-[11px] text-slate-500 font-mono shrink-0">time</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {showAdvanced && (
+            {fieldsSource === "full" && showAdvanced && (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Parameters</div>
@@ -992,12 +1147,38 @@ export function FieldsSlideInPanel({
                       title={`@${p.id}`}
                     >
                       <div className="flex items-center gap-2 min-w-0">
-                        <Hash className="w-3.5 h-3.5 text-sky-300" />
+                        <span className="flex h-3.5 w-3.5 items-center justify-center text-[10px] font-mono text-sky-300" title="Parameter">@</span>
                         <div className="min-w-0">
                           <div className="text-xs font-semibold text-white truncate">{p.name}</div>
                         </div>
                       </div>
-                      <div className="text-[11px] text-slate-500 font-mono shrink-0">{p.kind}:{p.valuesCount}</div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <div className="text-[11px] text-slate-500 font-mono">{p.kind}:{p.valuesCount}</div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            editListParameter(p.id);
+                          }}
+                          className="px-1.5 py-0.5 text-[10px] rounded border border-white/10 text-slate-300 hover:bg-white/10"
+                          title="Edit parameter"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            deleteListParameter(p.id);
+                          }}
+                          className="px-1.5 py-0.5 text-[10px] rounded border border-rose-500/30 text-rose-300 hover:bg-rose-500/20"
+                          title="Delete parameter"
+                        >
+                          Del
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1005,7 +1186,7 @@ export function FieldsSlideInPanel({
             </div>
             )}
 
-            {showAdvanced && (
+            {fieldsSource === "full" && (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Field Parameters</div>
@@ -1078,7 +1259,13 @@ export function FieldsSlideInPanel({
                         e.dataTransfer.effectAllowed = "copy";
                         e.dataTransfer.setData(
                           "application/json",
-                          JSON.stringify({ kind: "semantic-field-parameter", fieldParameterId: fp.id, name: fp.name })
+                          JSON.stringify({
+                            kind: "semantic-field-parameter",
+                            fieldParameterId: fp.id,
+                            name: fp.name,
+                            ref: fp.defaultRef || fp.name,
+                            fieldType: fp.kind,
+                          })
                         );
                       }}
                       className="flex items-center justify-between gap-2 px-2 py-2 rounded-lg hover:bg-white/10 transition-colors cursor-grab active:cursor-grabbing"
@@ -1090,7 +1277,33 @@ export function FieldsSlideInPanel({
                           <div className="text-xs font-semibold text-white truncate">{fp.name}</div>
                         </div>
                       </div>
-                      <div className="text-[11px] text-slate-500 font-mono shrink-0">{fp.kind}:{fp.count}</div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <div className="text-[11px] text-slate-500 font-mono">{fp.kind}:{fp.count}</div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            editFieldParameter(fp.id);
+                          }}
+                          className="px-1.5 py-0.5 text-[10px] rounded border border-white/10 text-slate-300 hover:bg-white/10"
+                          title="Edit field parameter"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            deleteFieldParameter(fp.id);
+                          }}
+                          className="px-1.5 py-0.5 text-[10px] rounded border border-rose-500/30 text-rose-300 hover:bg-rose-500/20"
+                          title="Delete field parameter"
+                        >
+                          Del
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1119,50 +1332,7 @@ export function FieldsSlideInPanel({
               </div>
             )}
 
-            {!!activeConnection?.id && (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Meta fields</div>
-                <div className="mt-2 space-y-1">
-                  {[
-                    { name: "Measure Names", ref: "__measureNames__" },
-                    { name: "Measure Values", ref: "__measureValues__" },
-                  ].map((mf) => (
-                    <div
-                      key={mf.ref}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.effectAllowed = "copy";
-                        e.dataTransfer.setData(
-                          "application/json",
-                          JSON.stringify({
-                            name: mf.name,
-                            table: "Meta",
-                            ref: mf.ref,
-                            kind: "meta-field",
-                            fieldType: "dimension",
-                            semanticType: "string",
-                            column: { name: mf.name, table: "Meta", type: "meta", classification: "dimension", ref: mf.ref },
-                            sourceType: "dimension",
-                          })
-                        );
-                      }}
-                      className="flex items-center justify-between gap-2 px-2 py-2 rounded-lg hover:bg-white/10 transition-colors cursor-grab active:cursor-grabbing"
-                      title={mf.name}
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Hash className="w-3.5 h-3.5 text-sky-300" />
-                        <div className="min-w-0">
-                          <div className="text-xs font-semibold text-white truncate">{mf.name}</div>
-                        </div>
-                      </div>
-                      <div className="text-[11px] text-slate-500 font-mono shrink-0">meta</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {hasSemanticFields && semanticTree.length > 0 && (
+            {hasSemanticFields && semanticTree.length > 0 && !isDemoSemanticPlaceholder && (
               <div className="space-y-3">
                 <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Semantic Model</div>
                 <div className="space-y-2">
@@ -1258,7 +1428,7 @@ export function FieldsSlideInPanel({
                                   title={`${t.modelName}.${m.name}`}
                                 >
                                   <div className="flex items-center gap-2 min-w-0">
-                                    <Hash className="w-3.5 h-3.5 text-emerald-300" />
+                                    <span className="w-3.5 h-3.5 flex items-center justify-center text-[11px] font-semibold text-emerald-300 leading-none" title="Measure">Σ</span>
                                     <div className="min-w-0">
                                       <div className="text-xs font-semibold text-white truncate">{m.name}</div>
                                     </div>
@@ -1276,83 +1446,8 @@ export function FieldsSlideInPanel({
               </div>
             )}
 
-            {!hasSemanticFields && !!activeConnection?.id && !schemaLoading && !schemaError && filteredModel && (
+            {!!activeConnection?.id && !schemaLoading && !schemaError && filteredModel && (
               <div className="space-y-3">
-                {calendarFields.length > 0 && (
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                    <div className="mt-4">
-                      <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2">Fields</div>
-                      <div className="text-[11px] text-slate-500 font-mono truncate max-w-[55%]">
-                        {String(bestTimeFieldRef ?? "").trim()}
-                      </div>
-                    </div>
-                    <div className="mt-2 space-y-1">
-                      {calendarFields
-                        .filter((f) => {
-                          const term = searchTerm.trim().toLowerCase();
-                          if (!term) return true;
-                          const n = String(f.name).toLowerCase();
-                          const t = String(f.table).toLowerCase();
-                          return n.includes(term) || t.includes(term);
-                        })
-                        .map((f) => (
-                          <div
-                            key={`${f.table}.${f.name}`}
-                            draggable
-                            onDragStart={(e) => {
-                              e.dataTransfer.effectAllowed = "copy";
-                              e.dataTransfer.setData(
-                                "application/json",
-                                JSON.stringify({
-                                  synthetic: "calendar",
-                                  granularity: f.__calendar?.granularity,
-                                  baseTimeRef: String(bestTimeFieldRef ?? "").trim(),
-                                  name: f.name,
-                                  table: f.table,
-                                  type: f.type,
-                                  sourceType: "timeField",
-                                })
-                              );
-                            }}
-                            className="flex items-center justify-between gap-2 px-2 py-2 rounded-lg hover:bg-white/10 transition-colors cursor-grab active:cursor-grabbing"
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              {(() => {
-                                const base = String(bestTimeFieldRef ?? "").trim();
-                                const g = String(f.__calendar?.granularity ?? "").trim();
-                                const checked = !!base && activeTime.dimension === base && activeTime.granularity === g;
-                                return (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      toggleSyntheticField(f);
-                                    }}
-                                    className={`w-4 h-4 rounded border shrink-0 transition-colors ${
-                                      checked
-                                        ? "bg-emerald-500/30 border-emerald-400/60"
-                                        : "bg-white/5 border-white/15 hover:border-white/30"
-                                    }`}
-                                    aria-pressed={checked}
-                                    title="Add/remove"
-                                  >
-                                    {checked ? <span className="block w-full h-full text-[10px] leading-[14px] text-emerald-200">✓</span> : null}
-                                  </button>
-                                );
-                              })()}
-                              <Calendar className="w-3.5 h-3.5 text-purple-300" />
-                              <div className="min-w-0">
-                                <div className="text-xs font-semibold text-white truncate">{f.name}</div>
-                              </div>
-                            </div>
-                            <div className="text-[11px] text-slate-500 font-mono shrink-0">time</div>
-                          </div>
-                        ))}
-                    </div>
-                  </div>
-                )}
-
                 <PowerBIFieldTree
                   model={filteredModel}
                   semanticModelV1Local={semanticModelV1Local}
@@ -1362,11 +1457,13 @@ export function FieldsSlideInPanel({
               </div>
             )}
 
-          {!hasSemanticFields && !filteredModel && !schemaLoading && (
+          {(!hasSemanticFields || isDemoSemanticPlaceholder) && !filteredModel && !schemaLoading && (
             <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
               <div className="text-sm text-slate-400">No schema loaded</div>
             </div>
           )}
+              </>
+            )}
           {!hasSearchResults && (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-center">
               <div className="text-sm text-slate-300">No fields match "{searchTerm.trim()}".</div>
@@ -1441,12 +1538,13 @@ function PowerBIFieldTree({
   const renderField = (
     f: { name: string; table: string; type: string; sourceType: "timeField" | "dimension" | "measure" }
   ) => {
-    const key = resolveSemanticRef(semanticModelV1Local, f.table, f.name) || toFieldRef({ name: f.name, table: f.table });
-    const checked = selectedKeys.has(key);
+    const legacyRef = toFieldRef({ name: f.name, table: f.table });
+    const key = resolveSemanticRef(semanticModelV1Local, f.table, f.name) || legacyRef;
+    const checked = selectedKeys.has(key) || selectedKeys.has(legacyRef);
     const icon = f.sourceType === "timeField"
       ? <Calendar className="w-3.5 h-3.5 text-purple-300" />
       : f.sourceType === "measure"
-        ? <Hash className="w-3.5 h-3.5 text-emerald-300" />
+        ? <span className="flex h-3.5 w-3.5 items-center justify-center text-[11px] font-semibold leading-none text-emerald-300" title="Measure">Σ</span>
         : <Database className="w-3.5 h-3.5 text-slate-400" />;
     const typeDotClass = f.sourceType === "measure"
       ? "bg-emerald-400/80"
@@ -1463,7 +1561,7 @@ function PowerBIFieldTree({
         data-field-name={f.name}
         data-field-table={f.table}
         data-field-type={f.sourceType}
-        className="flex items-center justify-between gap-2 px-2 py-2 rounded-lg hover:bg-white/10 transition-colors cursor-grab active:cursor-grabbing"
+        className="flex items-center justify-between gap-2 px-2 py-1 rounded-md hover:bg-white/10 transition-colors cursor-grab active:cursor-grabbing"
       >
         <div className="flex items-center gap-2 min-w-0">
           <button
@@ -1473,7 +1571,7 @@ function PowerBIFieldTree({
               e.stopPropagation();
               onToggle(f, f.sourceType);
             }}
-            className={`w-4 h-4 rounded border shrink-0 transition-colors ${
+            className={`w-[18px] h-[18px] rounded border shrink-0 transition-colors ${
               checked
                 ? "bg-emerald-500/30 border-emerald-400/60"
                 : "bg-white/5 border-white/15 hover:border-white/30"
@@ -1488,7 +1586,7 @@ function PowerBIFieldTree({
             <div className="text-xs font-semibold text-white truncate">{f.name}</div>
           </div>
         </div>
-        <div className="text-[11px] text-slate-500 font-mono shrink-0">{String(f.type).split("(")[0]}</div>
+        <div className="text-[10px] text-slate-500/70 font-mono shrink-0 max-w-[4rem] truncate" title={String(f.type)}>{String(f.type).split("(")[0]}</div>
         <span className={`w-2 h-2 rounded-full shrink-0 ${typeDotClass}`} title={f.sourceType} />
       </div>
     );
@@ -1513,6 +1611,7 @@ function PowerBIFieldTree({
               className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
             >
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-200 min-w-0">
+                <Table2 className="h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden />
                 <span className="truncate">{table}</span>
               </div>
               <div className="text-xs text-slate-400">{tableExpanded ? "−" : "+"}</div>

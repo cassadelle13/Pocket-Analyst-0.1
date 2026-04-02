@@ -1,4 +1,4 @@
-export type SqlDialect = "clickhouse" | "postgres";
+export type SqlDialect = "clickhouse" | "postgres" | "mssql";
 
 export type WindowAggFn = "sum" | "avg" | "max" | "min" | "count";
 

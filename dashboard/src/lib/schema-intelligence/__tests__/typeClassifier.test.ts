@@ -4,6 +4,7 @@
  * Unit tests for column type classification
  */
 
+import { describe, it, expect } from "vitest";
 import { classifyColumn } from '../typeClassifier';
 import type { ColumnMetadata } from '../types';
 

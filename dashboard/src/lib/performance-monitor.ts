@@ -329,8 +329,14 @@ class PerformanceMonitor {
     if (typeof window === 'undefined') return;
     
     try {
-      performance.mark(`${name}-end`);
-      performance.measure(name, `${name}-start`, `${name}-end`);
+      const startMark = `${name}-start`;
+      const endMark = `${name}-end`;
+      // Avoid SyntaxError when start was never recorded or was cleared (e.g. race with another caller).
+      if (performance.getEntriesByName(startMark, 'mark').length === 0) {
+        return;
+      }
+      performance.mark(endMark);
+      performance.measure(name, startMark, endMark);
       
       const measure = performance.getEntriesByName(name, 'measure')[0];
       if (measure && measure.duration > this.LONG_TASK_THRESHOLD) {

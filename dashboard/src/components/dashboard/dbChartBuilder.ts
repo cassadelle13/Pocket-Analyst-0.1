@@ -489,8 +489,8 @@ export function pickAxes(cols: string[], colTypes: ColType[], opts?: { mapping?:
   let xIdx = dateIndices[0] ?? strIndices[0] ?? -1;
   let xIsDate = dateIndices.length > 0 && xIdx === dateIndices[0];
 
-  // All-numeric fallback: use first column as X (category/ID)
-  if (xIdx < 0 && numIndices.length >= 2) {
+  // All-numeric fallback: use first numeric column as X/category.
+  if (xIdx < 0 && numIndices.length >= 1) {
     xIdx = numIndices[0];
     xIsDate = false;
   }

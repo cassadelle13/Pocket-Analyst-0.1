@@ -1,4 +1,5 @@
 import { compileSemanticQuery } from "../planner";
+import { test } from "vitest";
 import type { LogicalQuery, SemanticModelV1 } from "../types";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -107,4 +108,6 @@ function main() {
   console.log("planner window wrapper suite: OK");
 }
 
-main();
+test("planner window wrapper suite", () => {
+  main();
+});

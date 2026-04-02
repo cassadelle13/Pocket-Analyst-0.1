@@ -15,6 +15,7 @@ export interface Project {
   nodes: any[];
   viewport?: DashboardViewport;
   semanticArtifacts?: any;
+  biFilters?: any[];
 }
 
 const emitProjectsChanged = () => {
@@ -55,6 +56,7 @@ export const saveProject = async (projectData: {
   nodes: any[];
   viewport?: DashboardViewport;
   semanticArtifacts?: any;
+  biFilters?: any[];
 }): Promise<string | null> => {
   try {
     const res = await fetch("/api/projects", {
@@ -67,6 +69,7 @@ export const saveProject = async (projectData: {
         nodes: projectData.nodes,
         viewport: projectData.viewport,
         semantic_artifacts: projectData.semanticArtifacts,
+        bi_filters: projectData.biFilters,
       }),
     });
     const data = await res.json();
@@ -86,7 +89,12 @@ export const loadProject = async (projectId: string): Promise<Project | null> =>
     const res = await fetch(`/api/projects?id=${encodeURIComponent(projectId)}`);
     const data = await res.json();
     if (data.ok && data.project) {
-      return data.project;
+      const p = data.project as any;
+      return {
+        ...p,
+        semanticArtifacts: p?.semanticArtifacts ?? p?.semantic_artifacts ?? null,
+        biFilters: Array.isArray(p?.biFilters) ? p.biFilters : (Array.isArray(p?.bi_filters) ? p.bi_filters : []),
+      };
     }
     return null;
   } catch (error) {
@@ -142,6 +150,7 @@ export const updateProject = async (projectId: string, patch: Partial<Project>):
         nodes: patch.nodes,
         viewport: patch.viewport,
         semantic_artifacts: patch.semanticArtifacts,
+        bi_filters: patch.biFilters,
       }),
     });
     const data = await res.json();

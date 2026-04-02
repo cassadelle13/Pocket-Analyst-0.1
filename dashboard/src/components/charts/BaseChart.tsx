@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, memo } from "react";
+import { useEffect, useRef, memo, useId } from "react";
 import { getPerformanceMonitor } from "../../lib/performance-monitor";
 import { buildEChartsBase } from "@/lib/chartTheme";
 import { useGraphicsMode } from "@/context/GraphicsContext";
@@ -8,6 +8,7 @@ import { useChartBus } from "@/context/ChartInteractionBus";
 import { useChartEnvironment } from "@/context/ChartEnvironment";
 import type { ChartInteractionPayload } from "@/types/interaction";
 import { useChartSyncSettings } from "@/context/ChartSyncSettings";
+import { useCrossSelection } from "@/store/crossSelectionContext";
 
 type Props = {
   option: Record<string, unknown>;
@@ -19,6 +20,8 @@ type Props = {
 };
 
 function BaseChart({ option, className, height = 360, onReady, chartId, groupId }: Props) {
+  /** Unique per mount so Performance marks do not collide across multiple charts on the page. */
+  const perfInitName = `BaseChart-init-${useId().replace(/:/g, "")}`;
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
   const echartsRef = useRef<any>(null);
@@ -30,17 +33,26 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
   const lastHoverTsRef = useRef<number>(0);
   const lastZoomTsRef = useRef<number>(0);
   const { syncEnabled } = useChartSyncSettings();
+  const { crossSelection, clearCrossSelection } = useCrossSelection();
   const applyingRemoteRef = useRef<boolean>(false);
   const { isLowGraphicsMode } = useGraphicsMode();
   const { themeTokens } = useChartEnvironment();
   const optionRef = useRef<Record<string, unknown>>(option);
+  const chartIdRef = useRef(chartId);
+  chartIdRef.current = chartId;
+  const groupIdRef = useRef(groupId);
+  groupIdRef.current = groupId;
+  const syncEnabledRef = useRef(syncEnabled);
+  syncEnabledRef.current = syncEnabled;
+  const clearCrossSelectionRef = useRef(clearCrossSelection);
+  clearCrossSelectionRef.current = clearCrossSelection;
 
   useEffect(() => {
     let disposed = false;
     const monitor = getPerformanceMonitor();
 
     (async () => {
-      monitor.mark('BaseChart-init');
+      monitor.mark(perfInitName);
       const echarts = await import("echarts");
 
       if (disposed) return;
@@ -71,8 +83,8 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
       const offFns: Array<() => void> = [];
 
       const publish = (partial: Omit<ChartInteractionPayload, "source">) => {
-        if (!syncEnabled) return;
-        bus.publish({ source: "echarts", chartId, groupId, ...partial });
+        if (!syncEnabledRef.current) return;
+        bus.publish({ source: "echarts", chartId: chartIdRef.current, groupId: groupIdRef.current, ...partial });
       };
 
       // Click handler
@@ -90,15 +102,23 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
       };
       chart.on("click", onClick);
       offFns.push(() => chart.off("click", onClick));
+      const onCanvasBlankClick = (evt: any) => {
+        try {
+          if (evt?.target) return;
+          clearCrossSelectionRef.current();
+        } catch {}
+      };
+      chart.getZr?.().on?.("click", onCanvasBlankClick);
+      offFns.push(() => chart.getZr?.().off?.("click", onCanvasBlankClick));
 
       // Legend selection changed
       const onLegend = (params: any) => {
         try {
           publish({ action: "legend", series: params?.name, meta: { params } });
           // Persist selected map per chart
-          if (chartId && params && params.selected) {
+          if (chartIdRef.current && params && params.selected) {
             try {
-              window.localStorage.setItem(`dashboard:legend:${chartId}`, JSON.stringify(params.selected));
+              window.localStorage.setItem(`dashboard:legend:${chartIdRef.current}`, JSON.stringify(params.selected));
             } catch {}
           }
         } catch {}
@@ -116,10 +136,10 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
           // Pass raw ranges; consumers can map to domain values if needed
           publish({ action: "zoom", meta: { params } });
           // Persist zoom range per chart
-          if (chartId && params) {
+          if (chartIdRef.current && params) {
             try {
               const batch = (params as any)?.batch?.[0] ?? params;
-              window.localStorage.setItem(`dashboard:zoom:${chartId}`, JSON.stringify({
+              window.localStorage.setItem(`dashboard:zoom:${chartIdRef.current}`, JSON.stringify({
                 start: batch?.start,
                 end: batch?.end,
                 startValue: batch?.startValue,
@@ -162,9 +182,9 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
       // Subscribe to bus to APPLY interactions from peer charts in same group
       busUnsubRef.current = bus.subscribe((evt) => {
         try {
-          if (!syncEnabled) return;
-          if (evt.groupId && groupId && evt.groupId !== groupId) return;
-          if (evt.chartId && chartId && evt.chartId === chartId) return; // ignore self
+          if (!syncEnabledRef.current) return;
+          if (evt.groupId && groupIdRef.current && evt.groupId !== groupIdRef.current) return;
+          if (evt.chartId && chartIdRef.current && evt.chartId === chartIdRef.current) return; // ignore self
 
           // Sync zoom coming from ECharts charts
           if (evt.action === "zoom" && evt.source === "echarts") {
@@ -204,8 +224,8 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
 
       // Restore persisted legend selection and zoom for this chart
       try {
-        if (chartId) {
-          const selRaw = window.localStorage.getItem(`dashboard:legend:${chartId}`);
+        if (chartIdRef.current) {
+          const selRaw = window.localStorage.getItem(`dashboard:legend:${chartIdRef.current}`);
           if (selRaw) {
             const selected = JSON.parse(selRaw) as Record<string, boolean>;
             const opt: any = chart.getOption?.();
@@ -220,7 +240,7 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
             }
           }
 
-          const zoomRaw = window.localStorage.getItem(`dashboard:zoom:${chartId}`);
+          const zoomRaw = window.localStorage.getItem(`dashboard:zoom:${chartIdRef.current}`);
           if (zoomRaw) {
             const z = JSON.parse(zoomRaw) as { start?: number; end?: number; startValue?: any; endValue?: any };
             try {
@@ -256,7 +276,7 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
         window.addEventListener("resize", onResize);
       }
       
-      monitor.measure('BaseChart-init');
+      monitor.measure(perfInitName);
     })();
 
     return () => {
@@ -306,23 +326,60 @@ function BaseChart({ option, className, height = 360, onReady, chartId, groupId 
       // Clear echarts reference
       echartsRef.current = null;
       
-      // Clear DOM reference
-      if (ref.current) {
-        ref.current = null;
-      }
+      // DOM ref is managed by React — do not null it manually
     };
   }, []);
 
   useEffect(() => {
+    const prevOpt = optionRef.current;
     optionRef.current = option;
     if (!chartRef.current) return;
     try {
+      const prevSeriesType = Array.isArray((prevOpt as any)?.series)
+        ? ((prevOpt as any).series[0] as any)?.type
+        : undefined;
+      const nextSeriesType = Array.isArray((option as any)?.series)
+        ? ((option as any).series[0] as any)?.type
+        : undefined;
+      const typeChanged = prevSeriesType !== nextSeriesType;
       const themedOption = buildEChartsBase(option as any, { lowGraphics: isLowGraphicsMode });
-      chartRef.current.setOption(themedOption, { notMerge: false, lazyUpdate: true });
+      chartRef.current.setOption(themedOption, { notMerge: typeChanged, lazyUpdate: true });
     } catch (e) {
       console.error('[BaseChart] Error updating chart option:', e);
     }
   }, [option, themeTokens, isLowGraphicsMode]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    try {
+      chart.dispatchAction({ type: "downplay" });
+      const active = crossSelection;
+      if (!active) return;
+      const sourceChartId = String(active.sourceChartId ?? "").trim();
+      if (sourceChartId && chartId && sourceChartId === chartId) return;
+      const value = String(active.value ?? "").trim();
+      if (!value) return;
+      const opt: any = chart.getOption?.();
+      const seriesList: any[] = Array.isArray(opt?.series) ? opt.series : [];
+      let highlighted = false;
+      for (let si = 0; si < seriesList.length; si++) {
+        const data: any[] = Array.isArray(seriesList[si]?.data) ? seriesList[si].data : [];
+        for (let di = 0; di < data.length; di++) {
+          const item = data[di];
+          const itemName = String(item?.name ?? "").trim();
+          const itemVal = Array.isArray(item) ? String(item[0] ?? "") : String(item?.value ?? "");
+          if (itemName === value || itemVal === value) {
+            chart.dispatchAction({ type: "highlight", seriesIndex: si, dataIndex: di });
+            highlighted = true;
+          }
+        }
+      }
+      if (!highlighted) {
+        chart.dispatchAction({ type: "highlight", name: value });
+      }
+    } catch {}
+  }, [crossSelection, chartId]);
 
   useEffect(() => {
     const handler = (evt: Event) => {

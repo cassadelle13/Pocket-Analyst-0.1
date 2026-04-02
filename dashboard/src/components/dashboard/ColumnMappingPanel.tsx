@@ -1,9 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SelectDropdown } from "../chart-config/SelectDropdown";
 import { resolveVizType } from "./dbChartBuilder";
 import { isVizType, type VizType } from "@/types/viz";
+import {
+  chartInferPhysicalKind,
+  defaultAggForMeasureType,
+} from "@/lib/chart/sqlTypePhysicalKind";
 
 export type ColumnMeta = {
   name: string;
@@ -18,14 +22,6 @@ export type ColumnMapping = {
   yColumns: Array<{ col: string; agg: AggFn }>;
   groupBy?: string;
 };
-
-function inferColKind(type?: string): "number" | "date" | "string" {
-  const t = String(type ?? "").toLowerCase();
-  if (!t) return "string";
-  if (/(date|time)/.test(t) && !/(varchar|char|text)/.test(t)) return "date";
-  if (/(int|decimal|numeric|real|double|float|money|smallint|bigint)/.test(t)) return "number";
-  return "string";
-}
 
 function uniq<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
@@ -56,9 +52,9 @@ export function ColumnMappingPanel({
 
   const { dateCols, numCols, strCols, allCols } = useMemo(() => {
     const allCols = columns.map((c) => c.name).filter(Boolean);
-    const dateCols = columns.filter((c) => inferColKind(c.type) === "date").map((c) => c.name);
-    const numCols = columns.filter((c) => inferColKind(c.type) === "number").map((c) => c.name);
-    const strCols = columns.filter((c) => inferColKind(c.type) === "string").map((c) => c.name);
+    const dateCols = columns.filter((c) => chartInferPhysicalKind(c.type) === "date").map((c) => c.name);
+    const numCols = columns.filter((c) => chartInferPhysicalKind(c.type) === "number").map((c) => c.name);
+    const strCols = columns.filter((c) => chartInferPhysicalKind(c.type) === "string").map((c) => c.name);
     return { dateCols, numCols, strCols, allCols };
   }, [columns]);
 
@@ -75,10 +71,9 @@ export function ColumnMappingPanel({
   }, [viz, dateCols, strCols, numCols, allCols]);
 
   const yCandidates = useMemo(() => {
-    if (viz === "pie" || viz === "donut" || viz === "treemap" || viz === "kpi") return numCols;
-    if (viz === "line" || viz === "area" || viz === "bar") return numCols;
-    return numCols;
-  }, [viz, numCols]);
+    if (viz === "scatter" || viz === "histogram") return numCols;
+    return numCols.length > 0 ? numCols : allCols;
+  }, [viz, numCols, allCols]);
 
   const groupCandidates = useMemo(() => {
     if (viz === "pie" || viz === "donut" || viz === "treemap") return [];
@@ -101,11 +96,25 @@ export function ColumnMappingPanel({
   const defaultX = initialMapping?.xColumn || (xCandidates[0] ?? "");
   const defaultY = initialMapping?.yColumns?.length
     ? initialMapping.yColumns
-    : (yCandidates[0] ? [{ col: yCandidates[0], agg: "SUM" as const }] : []);
+    : yCandidates[0]
+      ? [
+          {
+            col: yCandidates[0],
+            agg: defaultAggForMeasureType(columns.find((c) => c.name === yCandidates[0])?.type) as AggFn,
+          },
+        ]
+      : [];
 
   const [xColumn, setXColumn] = useState<string>(defaultX);
   const [groupBy, setGroupBy] = useState<string>(initialMapping?.groupBy ?? "");
   const [measures, setMeasures] = useState<Array<{ col: string; agg: AggFn }>>(defaultY);
+
+  useEffect(() => {
+    setXColumn(defaultX);
+    setGroupBy(initialMapping?.groupBy ?? "");
+    setMeasures(defaultY);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartName, vizTypeOverride, initialMapping]);
 
   const canApply = useMemo(() => {
     if (viz === "table") return true;
@@ -149,14 +158,24 @@ export function ColumnMappingPanel({
               <SelectDropdown
                 label="X"
                 value={measures[0]?.col ?? ""}
-                onChange={(v) => setMeasures((prev) => [{ col: v, agg: "SUM" }, prev[1] ?? { col: "", agg: "SUM" }])}
+                onChange={(v) =>
+                  setMeasures((prev) => [
+                    { col: v, agg: defaultAggForMeasureType(columns.find((c) => c.name === v)?.type) as AggFn },
+                    prev[1] ?? { col: "", agg: "SUM" as AggFn },
+                  ])
+                }
                 options={yOptions}
                 placeholder="Select numeric..."
               />
               <SelectDropdown
                 label="Y"
                 value={measures[1]?.col ?? ""}
-                onChange={(v) => setMeasures((prev) => [prev[0] ?? { col: "", agg: "SUM" }, { col: v, agg: "SUM" }])}
+                onChange={(v) =>
+                  setMeasures((prev) => [
+                    prev[0] ?? { col: "", agg: "SUM" as AggFn },
+                    { col: v, agg: defaultAggForMeasureType(columns.find((c) => c.name === v)?.type) as AggFn },
+                  ])
+                }
                 options={yOptions}
                 placeholder="Select numeric..."
               />
@@ -182,7 +201,19 @@ export function ColumnMappingPanel({
                   <SelectDropdown
                     label={idx === 0 ? "Measure" : undefined}
                     value={m.col}
-                    onChange={(v) => setMeasures((prev) => prev.map((p, i) => i === idx ? { ...p, col: v } : p))}
+                    onChange={(v) =>
+                      setMeasures((prev) =>
+                        prev.map((p, i) =>
+                          i === idx
+                            ? {
+                                ...p,
+                                col: v,
+                                agg: defaultAggForMeasureType(columns.find((c) => c.name === v)?.type) as AggFn,
+                              }
+                            : p
+                        )
+                      )
+                    }
                     options={yOptions}
                     placeholder="Select numeric..."
                   />

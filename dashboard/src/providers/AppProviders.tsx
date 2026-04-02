@@ -18,6 +18,8 @@ import { ChartSyncSettingsProvider } from "../context/ChartSyncSettings";
 import { ChartClickBehaviorProvider } from "../context/ChartClickBehavior";
 import { GlobalFiltersProvider } from "@/store/globalFiltersContext";
 import { BiFiltersProvider } from "@/store/biFiltersContext";
+import { CrossSelectionProvider } from "@/store/crossSelectionContext";
+import { VisualInteractionsProvider } from "@/store/visualInteractionsContext";
 import { ChartExplainModal } from "@/components/charts/ChartExplainModal";
 
 export function AppProviders({ children }: { children: ReactNode }) {
@@ -51,7 +53,11 @@ export function AppProviders({ children }: { children: ReactNode }) {
                         <ChartInteractionProvider>
                           <GlobalFiltersProvider>
                             <BiFiltersProvider>
-                              {children}
+                              <VisualInteractionsProvider>
+                                <CrossSelectionProvider>
+                                  {children}
+                                </CrossSelectionProvider>
+                              </VisualInteractionsProvider>
                             </BiFiltersProvider>
                           </GlobalFiltersProvider>
                         </ChartInteractionProvider>
