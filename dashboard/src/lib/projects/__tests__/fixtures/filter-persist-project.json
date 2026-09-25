@@ -1,0 +1,28 @@
+{
+  "id": "fixture_project_filter_persist",
+  "name": "Filter persist fixture",
+  "nodes": [
+    {
+      "id": "chart-a",
+      "type": "bar",
+      "name": "Revenue",
+      "data": {
+        "logicalQuery": {
+          "sourceModel": "app",
+          "dimensions": ["app.country"],
+          "measures": ["app.revenue"]
+        }
+      }
+    }
+  ],
+  "viewport": { "pan": { "x": 0, "y": 0 }, "zoom": 1 },
+  "biFilters": [
+    {
+      "field": "app.country",
+      "op": "in",
+      "values": ["DE"],
+      "scope": "report",
+      "sourceChartId": "slicer-report"
+    }
+  ]
+}

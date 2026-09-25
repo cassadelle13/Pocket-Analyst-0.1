@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node --enable-source-maps dist/index.js",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json --pretty false --incremental false",
+    "typecheck:keyed": "node ../scripts/agent/diag-baseline.mjs tsc --project datatalk-agent",
+    "test": "node --import tsx --test test/rolePolicy.test.ts"
   },
   "dependencies": {
     "fastify": "^4.29.1",
