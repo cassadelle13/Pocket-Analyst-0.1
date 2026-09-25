@@ -1,0 +1,17 @@
+---
+description: Unit, contract, and E2E test conventions
+globs: dashboard/src/**/__tests__/**,dashboard/e2e/**,datatalk-agent/test/**
+alwaysApply: false
+---
+
+# Testing
+
+- One `it` / `test` per behavior. Do not wrap a whole suite in a single `test()` that hides later asserts.
+- No `waitForTimeout` in new E2E. No hardcoded `PROJECT_ID` — use fixtures created in the test.
+- Security and scoping need negative cases, not only the happy path.
+- Known product defects use `it.fails` plus `KNOWN DEFECT` in the title. Do not flip them to passing without a product fix. Do not update a baseline to hide a new diagnostic.
+- Planner changes: assert compiled SQL for each affected dialect. Snapshot edits need a line-by-line explanation.
+- Typecheck uses keyed diagnostics (`scripts/agent/check.sh` / `diag-baseline.mjs`), not “error count stayed the same”. `npm run typecheck` is raw `tsc` (fails on any diagnostic when the baseline is 0). `npm run typecheck:keyed` is the keyed wrapper.
+- Run checks through `scripts/agent/check.sh`. `quick` / `affected` / `full` are not interchangeable. `full` includes the dashboard build. Do not duplicate that logic in skills or CI.
+- Task scope is `scripts/agent/changed-files.mjs` (reliable base plus staged/unstaged/untracked), not `git diff HEAD` after a commit. `quick` does not confirm required units. `affected` without a mapped suite does not confirm logic changes.
+- Source-string tests are static characterization only. Known defects stay `it.fails` + `KNOWN DEFECT` and are not proof the product works. `filterPersist.fixture.test.ts` is not save/load or C4 coverage; I9 PUT is `projectsPutDropsBiFilters.test.ts`.

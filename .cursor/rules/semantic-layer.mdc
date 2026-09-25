@@ -1,0 +1,16 @@
+---
+description: Semantic planner, validator, dialects, and formula grammar
+globs: dashboard/src/lib/semantic/**,dashboard/src/lib/schema-intelligence/**,dashboard/src/lib/sqlDialect.ts
+alwaysApply: false
+---
+
+# Semantic layer
+
+`lib/semantic` is a pure TypeScript kernel: no React, no `app/api`, no cycles.
+
+- Input errors throw; do not swallow them (`catch { continue; }` in ORDER BY already hides a real bug — do not copy that).
+- One formula grammar: `tokenizeCalcExpr` / `parseCalcExpr` in planner, reused by `expressionEngine.ts`.
+- A new operator or dialect needs a unit test for each affected dialect: `postgres`, `clickhouse`, `mssql`. `SqlDialect` has no `mysql` today — do not pretend it does.
+- Changing `.snap` requires a line-by-line SQL explanation in the PR. `planner.golden` currently pins a missing ORDER BY for an explicit measure sort.
+- Two model factories exist (`SchemaIntelligenceService` and `buildAutoSemanticModel`). Changing type inference in one without the other is a defect unless the PR says why.
+- After planner changes run `cd dashboard && npm test -- src/lib/semantic`.

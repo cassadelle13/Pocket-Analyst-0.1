@@ -1,0 +1,15 @@
+---
+description: BI filters, canvas events, and project save/load
+globs: dashboard/src/store/**,dashboard/src/components/dashboard/**,dashboard/src/lib/dashboardEventBus.ts,dashboard/src/lib/dashboardEvents.ts,dashboard/src/lib/projectsStorage.ts,dashboard/src/app/api/projects/**
+alwaysApply: false
+---
+
+# Filters and dashboard state
+
+State lives in React context, `DashboardEvent` on `window`, and `localStorage`. Postgres is not the source of truth for BI filters today.
+
+- Dispatch only via `DashboardEvent` in `lib/dashboardEvents.ts`. Do not add raw `"dashboard:*"` string literals (`eslint` `no-restricted-syntax` warns on this).
+- Scoping has two implementations: `scopeBiFiltersForRequest` (server, no context → all filters) and `getScopedBiFiltersForChart` (client, no context → report only). Change them together and add a case to `scopeConsistency.test.ts`.
+- `/api/projects` ignores `bi_filters` (I9). `DragDropCanvas` load dispatches `filters: []` from the server payload (C4). Do not call that “saved with the project”.
+- Client persist key is `dashboard:bi-filters:${projectId}` (`biFiltersStorageKey`). Do not wipe it with an empty array unless the user cleared filters.
+- After filter or save/load changes: `scripts/agent/check.sh affected` and the fixture in `src/lib/projects/__tests__/filterPersist.fixture.test.ts`.

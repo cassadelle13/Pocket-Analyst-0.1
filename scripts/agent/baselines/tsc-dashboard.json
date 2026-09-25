@@ -1,0 +1,7 @@
+{
+  "tool": "tsc",
+  "project": "dashboard",
+  "reason": "Initial baseline 2026-09-25: tsconfig.typecheck.json (src, e2e, scripts; excludes .next) reports 0 errors, TypeScript 5.9.3",
+  "total": 0,
+  "entries": {}
+}

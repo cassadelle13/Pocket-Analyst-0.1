@@ -1,0 +1,16 @@
+---
+description: Meta-database schema, connections, uploads, and secrets
+globs: datatalk-db-init/**,dashboard/src/lib/datatalkMetaDb.ts,dashboard/src/lib/datatalkCrypto.ts,dashboard/src/lib/uploads/**,dashboard/src/lib/userManagement.ts,dashboard/src/lib/auditLog.ts,dashboard/src/lib/backup.ts,dashboard/src/lib/credentialVault.ts,dashboard/src/lib/connectionPresets.ts,dashboard/src/app/api/datatalk/connections/**,dashboard/src/app/api/uploads/**
+alwaysApply: false
+---
+
+# Database and connections
+
+Schema lives in init SQL (`datatalk-db-init/postgres/02_init_idempotent.sql`, `03_projects_table.sql`) and in runtime `CREATE TABLE IF NOT EXISTS` (no versioned migrations).
+
+- A schema change needs both the init script and a plan for an existing Docker volume (init does not re-run).
+- Qualify schema names (`datatalk_meta`, `pa_upload`). Do not create tables on an implicit `search_path`.
+- Connection secrets: write only `password_enc` when encryption is available (`canUseEncryption()`). Never log secrets. `GET` connections must not return plaintext passwords.
+- Source of truth for connections is `datatalk_meta.connections`, not `connection_profiles` / `connection_presets`.
+- Uploads: `materializeToPostgres.ts` currently types every column as `TEXT` (I12). `connectionId` is resolved by name (`Local Postgres`) — do not assume it is the same database without checking.
+- Do not run migrations or writes against the owner's volumes. Isolated test data only.

@@ -1,0 +1,16 @@
+---
+description: Next.js route handlers — errors, mocks, shared clients
+globs: dashboard/src/app/api/**
+alwaysApply: false
+---
+
+# API routes
+
+Each `route.ts` validates input, talks to DB/agent, and shapes the response. There is no shared service layer.
+
+- Do not create another private `queryClickHouse`. Sixteen copies already exist under `/api/rest/*`.
+- A source error is an HTTP 4xx/5xx with an error body, not `[]`. Several rest routes currently return `[]` on ClickHouse failure (I10) — do not extend that pattern.
+- Synthetic / Ghost Data is allowed only behind an explicit flag and must be labeled in the JSON. `users-graph` always returns Ghost Data (I11) — do not treat a chart on that route as proof of a real query.
+- Do not add `fetch('http://127.0.0.1:7891/ingest/...')` debug calls.
+- Internal HTTP to another route (`semantic/query` → `datatalk/query`) must keep failing with the upstream status, not an empty success.
+- Auth middleware is not present (`src/middleware.ts` does not exist). Do not claim a new route is protected unless it actually checks a server-side identity.

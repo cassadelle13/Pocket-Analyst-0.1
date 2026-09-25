@@ -81,3 +81,7 @@ build/
 
 # Misc
 .windsurf/
+
+# Local portable toolchain and agent verification state
+.tools/
+.cursor/state/

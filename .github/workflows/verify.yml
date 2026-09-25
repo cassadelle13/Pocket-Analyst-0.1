@@ -1,0 +1,43 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [main, "agent/**", "chore/**"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CLICKHOUSE_HOST: localhost
+      CLICKHOUSE_DATABASE: analytics
+      DATATALK_AGENT_URL: http://localhost:9010
+      DATATALK_AGENT_SHARED_SECRET: ci-placeholder-not-a-real-secret
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            dashboard/package-lock.json
+            datatalk-agent/package-lock.json
+
+      - name: Install dashboard
+        working-directory: dashboard
+        run: npm ci --legacy-peer-deps
+
+      - name: Install datatalk-agent
+        working-directory: datatalk-agent
+        run: npm ci
+
+      - name: Full checks
+        env:
+          PA_CHECK_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          PA_CHECK_BUILD: "1"
+          CI: "true"
+        run: bash scripts/agent/check.sh full

@@ -1,0 +1,7 @@
+{
+  "tool": "tsc",
+  "project": "datatalk-agent",
+  "reason": "Initial baseline 2026-09-25: tsc --noEmit on datatalk-agent reports 0 errors",
+  "total": 0,
+  "entries": {}
+}

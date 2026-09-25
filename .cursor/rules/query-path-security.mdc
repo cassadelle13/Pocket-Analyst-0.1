@@ -1,0 +1,18 @@
+---
+description: Security rules for SQL execution paths, roles, and agent calls
+globs: dashboard/src/app/api/query/**,dashboard/src/app/api/datatalk/**,dashboard/src/app/api/semantic/**,dashboard/src/app/api/connect/**,datatalk-agent/src/**,ai-service/**
+alwaysApply: false
+---
+
+# Query path security
+
+These paths execute SQL. Treat incoming `role`, `semanticModel`, `sourceBindings`, and `tableKey` as untrusted.
+
+- Do not add a new SQL execution path. Reuse `/api/datatalk/query` → `datatalk-agent`. Do not copy `queryClickHouse` into a route.
+- Do not add a new `role: "admin"` literal. Role is currently taken from the client (I6/S1) — do not widen that. Server-side role is the target, not the present state.
+- `tableKey` and SQL fragments (`dimension.sql`, `measure.sql`, join `on`) must not be concatenated from raw client strings. Prefer an allowlist. `FORBIDDEN_SQL_RE` is a blacklist and is not sufficient.
+- Every new agent call must go through one shared client (base URL + optional `DATATALK_AGENT_SHARED_SECRET`). Do not invent another `getAgentBaseUrl()`.
+- Audit (`insertQueryAudit`) is required on the semantic / datatalk path. `/api/rest/*` currently bypasses it — do not add more unaudited paths.
+- Never log or return connection passwords, `password_enc`, or agent secrets.
+
+`enforceRolePolicy` in `datatalk-agent/src/rolePolicy.ts` skips checks for `admin`. A `user` DELETE must still be rejected. Do not describe this as working authorization.
